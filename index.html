@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Manual Loop)</title>
+    <title>FIT Time Shifter (Final)</title>
     <style>
-        body { font-family: sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
-        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .status { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #b00; border: 1px solid #fcc; }
+        .success { background: #f4fce3; color: #2f9e44; border: 1px solid #b2f2bb; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift and Download</button>
+        <button id="runBtn">Shift & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile } from './index.js?v=manual';
+        import { Decoder, Stream, Encoder } from './index.js?v=final_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -38,7 +38,7 @@
 
             if (fileInput.files.length === 0) return alert("Select a file!");
 
-            statusBox.innerHTML = "⏳ Decoding file...";
+            statusBox.innerHTML = "⏳ Processing...";
             statusBox.className = "status";
 
             try {
@@ -46,45 +46,39 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // 1. Read EVERYTHING at once into an object
-                const { messages } = decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false
-                });
-
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 2. Manually loop through the messages object
-                for (const mesgName in messages) {
-                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                    if (mesgNum === undefined) continue;
+                // We use the raw 'read' with a listener. 
+                // This captures messages AS they are decoded.
+                decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false,
+                    mesgListener: (mesgNum, message) => {
+                        // 1. Shift the numeric timestamps
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    messages[mesgName].forEach(msg => {
-                        // Apply time shift
-                        if (msg.timestamp !== undefined) msg.timestamp += offset;
-                        if (msg.startTime !== undefined) msg.startTime += offset;
-                        if (msg.startDate !== undefined) msg.startDate += offset;
-
-                        // Inject the mesgNum for the encoder
-                        msg.mesgNum = mesgNum;
-
+                        // 2. PIPE TO ENCODER
+                        // In the official SDK, onMesg(num, data) automatically 
+                        // creates the required Definition Message.
                         try {
-                            encoder.writeMesg(msg);
+                            encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn("Skipped record:", e.message);
+                            console.warn("Skipped record:", mesgNum, e.message);
                         }
-                    });
-                }
+                    }
+                });
 
+                // 3. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Decoder found no messages. Check file format.");
+                if (count === 0) throw new Error("No records found in file.");
+                if (result.length < 200) throw new Error(`Only ${result.length} bytes written. Header only.`);
 
-                // 3. Trigger Download
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
