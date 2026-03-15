@@ -2,34 +2,34 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Safe Mode)</title>
+    <title>FIT Time Shifter (Safe Sync)</title>
     <style>
-        body { font-family: sans-serif; padding: 2rem; line-height: 1.5; max-width: 500px; margin: 0 auto; background: #f0f2f5; }
-        .card { border: 1px solid #ccc; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
-        .success { background: #efe; color: #28a745; border: 1px solid #cfc; }
-        .info { background: #eef; color: #007bff; border: 1px solid #ccf; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:hover { background: #0056b3; }
-        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; padding: 2rem; line-height: 1.5; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #dee2e6; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .status { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; font-weight: bold; text-align: center; }
+        .error { background: #fff5f5; color: #e03131; border: 1px solid #ffa8a8; }
+        .success { background: #f4fce3; color: #2f9e44; border: 1px solid #b2f2bb; }
+        .info { background: #e7f5ff; color: #1971c2; border: 1px solid #a5d8ff; }
+        button { width: 100%; padding: 12px; background: #228be6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        button:hover { background: #1c7ed6; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
 <body>
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select File:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift Seconds:</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Start Processing</button>
+        <button id="runBtn">Adjust and Download</button>
     </div>
 
     <div id="statusBox" class="status info">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=final_safe';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=safesync';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -40,36 +40,38 @@
 
             if (fileInput.files.length === 0) return alert("Please select a file!");
 
-            const file = fileInput.files[0]; // Targeted correctly
-            statusBox.innerHTML = "⏳ Processing...";
+            statusBox.innerHTML = "⏳ Processing... please wait.";
             statusBox.className = "status info";
 
             try {
+                const file = fileInput.files[0]; 
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 const encoder = new Encoder();
                 let count = 0;
 
-                // SAFE READ: No while loop. We use the standard read() 
-                // but pass a listener to catch data as it flows.
+                // CRITICAL: Options to prevent the decoder from creating complex objects
+                // that the encoder cannot handle.
                 decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // Apply time shift
+                        // 1. Shift the numeric timestamps
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // Force the ID into the message for the encoder
-                        message.mesgNum = mesgNum;
-                        
+                        // 2. Remove expanded fields (computed data) - This prevents re-encoding crashes
+                        Utils.removeExpandedFields(message);
+
+                        // 3. Encode the raw message
                         try {
-                            encoder.onMesg(message);
-                            count++;
-                        } catch (e) {
-                            // Fallback if the SDK is an older version
                             encoder.onMesg(mesgNum, message);
                             count++;
+                        } catch (e) {
+                            console.warn("Skipped a record:", e.message);
                         }
                     }
                 });
@@ -77,25 +79,23 @@
                 // Finalize the file
                 const result = encoder.close();
 
-                if (result.length < 200) {
-                    throw new Error(`Output too small (${result.length} bytes). Encoder failed.`);
-                }
+                if (result.length < 200) throw new Error("File empty - no records found.");
 
-                // Download Logic
+                // Trigger Download
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = "shifted_" + file.name;
+                a.download = `shifted_${file.name}`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
+                statusBox.innerHTML = `✅ Success! Adjusted ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("Critical Error:", err);
+                console.error("SDK Process Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
