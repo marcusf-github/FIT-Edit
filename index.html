@@ -6,8 +6,8 @@
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; white-space: pre-wrap; font-family: monospace; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; font-size: 0.8rem; white-space: pre-wrap; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
@@ -19,15 +19,15 @@
     <div class="card">
         <label>1. Select Strava .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift time (seconds):</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Adjust and Download</button>
+        <button id="runBtn">Shift and Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=strava_fix';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=strava_final';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,44 +37,44 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            
-            runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Stripping Strava-specific data...";
+            const file = fileInput.files[0];
+
+            statusBox.innerHTML = "⏳ Stripping Strava metadata...";
             statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0];
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Decode with RAW numeric settings
+                // 1. Force RAW decoding (No Dates, No Units)
                 const { messages } = decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false
                 });
 
-                // 2. Loop through message types (record, lap, etc.)
+                // 2. Loop through all message types
                 for (const mesgName in messages) {
                     const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
                     if (mesgNum === undefined) continue;
 
                     messages[mesgName].forEach(msg => {
-                        // 3. Apply time shift
+                        // 3. Shift the raw FIT Epoch integers
                         if (msg.timestamp !== undefined) msg.timestamp += offset;
                         if (msg.startTime !== undefined) msg.startTime += offset;
                         if (msg.startDate !== undefined) msg.startDate += offset;
 
-                        // 4. THE FIX: Strict Whitelist Rebuild
-                        // We only copy fields that are standard numbers or strings.
+                        // 4. THE FIX: Create a CLEAN Whitelist Object
+                        // We ONLY copy standard numbers/strings. 
+                        // This ignores the "helper objects" and Strava's custom fields.
                         const cleanMsg = {};
                         for (const key in msg) {
                             const val = msg[key];
-
-                            // SKIP problematic fields added by Strava or the SDK
+                            
+                            // SKIP fields that cause Encoder Rejection:
                             if (key.includes('enhanced') || 
                                 key.includes('developer') || 
                                 key.includes('unknown') ||
@@ -83,33 +83,30 @@
                                 continue;
                             }
 
-                            // ONLY copy simple data types (Numbers, Strings, Booleans)
-                            // This ignores the "helper objects" that break the encoder.
+                            // ONLY accept raw numbers, strings, or booleans
                             if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
                                 cleanMsg[key] = val;
                             }
                         }
 
-                        // Remove standard expanded fields just in case
+                        // Final safety strip
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(cleanMsg);
                         }
 
                         try {
-                            // 5. Write using the (ID, DATA) format
+                            // 5. Official write method: onMesg(mesgNum, data)
                             encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            // Log why a record failed (likely a custom Strava field)
                             console.warn(`Skipped ${mesgName}: ${e.message}`);
                         }
                     });
                 }
 
-                // 6. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("The Encoder rejected every record. This usually happens if the file contains no standard FIT data.");
+                if (count === 0) throw new Error("The Encoder rejected every record. Check Console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -120,15 +117,13 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length / 1024).toFixed(1)} KB)`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length/1024).toFixed(1)} KB)`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Error:", err);
-                statusBox.innerHTML = `❌ Error: ${err.message}`;
+                console.error(err);
+                statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
-            } finally {
-                runBtn.disabled = false;
             }
         });
     </script>
