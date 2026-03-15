@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Universal)</title>
+    <title>FIT Time Shifter (Deep Clean)</title>
     <style>
-        body { font-family: sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Sanitise and Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=universal';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_clean';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,57 +37,60 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            const file = fileInput.files[0]; // Targeted first file specifically
+            const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Decoding file...";
+            statusBox.innerHTML = "⏳ Stripping expanded fields...";
             statusBox.className = "status";
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // 1. Read the entire file into a 'messages' object
-                const { messages } = decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false
-                });
-
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 2. Loop through every type of message found (record, lap, session, etc.)
-                for (const mesgName in messages) {
-                    // Look up the numeric ID for this message name (e.g. 'record' -> 20)
-                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                    if (mesgNum === undefined) continue;
+                // 1. Decoder MUST use raw settings for the encoder to accept data
+                decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false,
+                    mesgListener: (mesgNum, message) => {
+                        // 2. SHIFT TIMESTAMPS (Raw FIT seconds)
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    messages[mesgName].forEach(msg => {
-                        // Apply time shift
-                        if (msg.timestamp !== undefined) msg.timestamp += offset;
-                        if (msg.startTime !== undefined) msg.startTime += offset;
-                        if (msg.startDate !== undefined) msg.startDate += offset;
-
-                        // Clean data so the encoder accepts it
+                        // 3. THE CRITICAL CLEAN: Strip everything that isn't a raw binary field
                         if (typeof Utils !== 'undefined' && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(msg);
+                            Utils.removeExpandedFields(message); // Standard SDK method
+                        }
+                        
+                        // 4. MANUAL SANITISER: Delete any fields the Encoder might choke on
+                        for (const key in message) {
+                            // Delete virtual date fields added by some decoder versions
+                            if (key.endsWith('_date') || key.endsWith('_units')) {
+                                delete message[key];
+                            }
+                            // Delete non-numeric/string fields (objects/arrays) that break encoding
+                            const val = message[key];
+                            if (typeof val === 'object' && val !== null && !(val instanceof Array)) {
+                                delete message[key];
+                            }
                         }
 
                         try {
-                            // Write message to the new file
-                            encoder.onMesg(mesgNum, msg);
+                            // 5. Official write method
+                            encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn(`Encoder skipped ${mesgName}:`, e.message);
+                            console.warn(`Record ${mesgNum} rejected: ${e.message}`);
                         }
-                    });
-                }
+                    }
+                });
 
-                // 3. Finalize and check
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No data records found. Try a different .fit file.");
+                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -102,7 +105,7 @@
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Error:", err);
+                console.error("SDK Error Details:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
