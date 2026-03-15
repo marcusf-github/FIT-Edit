@@ -10,8 +10,8 @@
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 
-import Accumulator from "../src/accumulator.js";
-import BitStream from "../src/bit-stream.js";
+import Accumulator from "./accumulator.js";
+import BitStream from "./bit-stream.js";
 import CrcCalculator from "./crc-calculator.js";
 import FIT from "./fit.js";
 import HrMesgUtils from "./utils-hr-mesg.js";
