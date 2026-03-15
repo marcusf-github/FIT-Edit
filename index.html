@@ -2,17 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Safe Sync)</title>
+    <title>FIT Time Shifter (Record-Safe)</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 2rem; line-height: 1.5; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
-        .card { border: 1px solid #dee2e6; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        .status { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; font-weight: bold; text-align: center; }
-        .error { background: #fff5f5; color: #e03131; border: 1px solid #ffa8a8; }
-        .success { background: #f4fce3; color: #2f9e44; border: 1px solid #b2f2bb; }
-        .info { background: #e7f5ff; color: #1971c2; border: 1px solid #a5d8ff; }
-        button { width: 100%; padding: 12px; background: #228be6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
-        button:hover { background: #1c7ed6; }
-        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; }
+        body { font-family: sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
 <body>
@@ -23,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Adjust and Download</button>
+        <button id="runBtn">Shift and Download</button>
     </div>
 
-    <div id="statusBox" class="status info">Ready</div>
+    <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=safesync';
+        import { Decoder, Stream, Encoder } from './index.js?v=record-safe';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -38,50 +36,52 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Please select a file!");
+            if (fileInput.files.length === 0) return alert("Select a file!");
 
-            statusBox.innerHTML = "⏳ Processing... please wait.";
-            statusBox.className = "status info";
+            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0]; 
+                const file = fileInput.files[0]; // Targeted first file in list
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 const encoder = new Encoder();
                 let count = 0;
 
-                // CRITICAL: Options to prevent the decoder from creating complex objects
-                // that the encoder cannot handle.
+                // Use the standard read() but with a listener
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // 1. Shift the numeric timestamps
+                        // 1. Shift timestamps
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. Remove expanded fields (computed data) - This prevents re-encoding crashes
-                        Utils.removeExpandedFields(message);
+                        // 2. Clone the object and inject the mesgNum
+                        // This strips hidden SDK metadata that causes encoding failures
+                        const cleanMsg = JSON.parse(JSON.stringify(message));
+                        cleanMsg.mesgNum = mesgNum;
 
-                        // 3. Encode the raw message
                         try {
-                            encoder.onMesg(mesgNum, message);
+                            // Using the direct write method
+                            encoder.writeMesg(cleanMsg);
                             count++;
                         } catch (e) {
-                            console.warn("Skipped a record:", e.message);
+                            console.warn("Write failed for record", mesgNum, e.message);
                         }
                     }
                 });
 
-                // Finalize the file
                 const result = encoder.close();
 
-                if (result.length < 200) throw new Error("File empty - no records found.");
+                if (result.length < 200) {
+                    throw new Error(`Only ${result.length} bytes written. Is this a valid FIT file?`);
+                }
 
-                // Trigger Download
+                // Download
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -91,11 +91,11 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Adjusted ${count} records.`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Process Error:", err);
+                console.error("SDK Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
