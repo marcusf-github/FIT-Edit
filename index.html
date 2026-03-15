@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Deep Clean)</title>
+    <title>FIT Time Shifter (Universal)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
-        .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        .status { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #b00; border: 1px solid #fcc; }
-        .success { background: #f4fce3; color: #2f9e44; border: 1px solid #b2f2bb; }
-        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        body { font-family: sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Clean & Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_clean';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=universal';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,60 +37,63 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            const file = fileInput.files[0];
+            const file = fileInput.files[0]; // Targeted first file specifically
 
-            statusBox.innerHTML = "⏳ Stripping and shifting data...";
+            statusBox.innerHTML = "⏳ Decoding file...";
             statusBox.className = "status";
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
+                
+                // 1. Read the entire file into a 'messages' object
+                const { messages } = decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false
+                });
+
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Strict raw settings
-                decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false,
-                    mesgListener: (mesgNum, message) => {
-                        // 2. SHIFT TIMESTAMPS
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                // 2. Loop through every type of message found (record, lap, session, etc.)
+                for (const mesgName in messages) {
+                    // Look up the numeric ID for this message name (e.g. 'record' -> 20)
+                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
+                    if (mesgNum === undefined) continue;
 
-                        // 3. THE CRITICAL CLEAN: Strip everything that isn't a raw field
-                        // If Utils.removeExpandedFields fails, we manually strip strings.
+                    messages[mesgName].forEach(msg => {
+                        // Apply time shift
+                        if (msg.timestamp !== undefined) msg.timestamp += offset;
+                        if (msg.startTime !== undefined) msg.startTime += offset;
+                        if (msg.startDate !== undefined) msg.startDate += offset;
+
+                        // Clean data so the encoder accepts it
                         if (typeof Utils !== 'undefined' && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(message);
+                            Utils.removeExpandedFields(msg);
                         }
-                        
-                        // Delete common "helper" fields that break the Encoder
-                        delete message.timestamp_date;
-                        delete message.start_time_date;
 
                         try {
-                            // 4. Write to encoder
-                            encoder.onMesg(mesgNum, message);
+                            // Write message to the new file
+                            encoder.onMesg(mesgNum, msg);
                             count++;
                         } catch (e) {
-                            // Log exactly why it failed in F12 Console
-                            console.warn(`Encoder rejected record ${mesgNum}: ${e.message}`);
+                            console.warn(`Encoder skipped ${mesgName}:`, e.message);
                         }
-                    }
-                });
+                    });
+                }
 
-                // 5. Finalize
+                // 3. Finalize and check
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
+                if (count === 0) throw new Error("No data records found. Try a different .fit file.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
+                a.download = "shifted_" + file.name;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
