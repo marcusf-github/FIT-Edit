@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (v21.195.00)</title>
+    <title>FIT Time Shifter v21.195.00</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; font-size: 0.85rem; white-space: pre-wrap; }
-        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
+        .error { background: #fff0f0; color: #d00; border: 1px solid #fcc; text-align: left; font-family: monospace; white-space: pre-wrap; font-size: 0.8rem; }
+        .success { background: #f0fff4; color: #2d6a4f; border: 1px solid #b7e4c7; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -18,14 +18,14 @@
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select local .fit file:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift time (seconds):</label>
         <input type="number" id="offset" value="0">
         <button id="runBtn">Adjust and Download</button>
     </div>
 
-    <div id="statusBox" class="status">Ready</div>
+    <div id="statusBox" class="status">Waiting for SDK...</div>
 
     <script type="module">
         import { Decoder, Stream, Encoder, Utils } from './index.js?v=21.195.00';
@@ -37,8 +37,8 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Please select a file!");
-            
+            if (fileInput.files.length === 0) return alert("Select a file first.");
+
             runBtn.disabled = true;
             statusBox.innerHTML = "⏳ Processing records...";
             statusBox.className = "status";
@@ -48,54 +48,43 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // Use a default Encoder; it will handle standard Activity profile.
                 const encoder = new Encoder(); 
                 let count = 0;
 
-                // RAW DECODING: Required to prevent 'Encoder rejected' errors
+                // DEEP SCAN: Intercept every message as it is decoded
                 decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false,
+                    convertTimestamp: false, // Keep as raw numeric seconds
+                    convertUnits: false,     // Disable human-readable units
+                    expandComponents: false, // Keep raw data structure
                     mesgListener: (mesgNum, message) => {
                         
-                        // 1. Shift Timestamps (if they exist as numbers)
+                        // 1. Shift Timestamps (Raw FIT Epoch seconds)
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. CRITICAL: Remove expanded (computed) fields that break re-encoding
+                        // 2. THE CRITICAL FIX: Remove computed/expanded fields
+                        // These are 'virtual' fields that cause the encoder to crash.
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(message);
                         }
 
-                        // 3. STRIP DEVELOPER DATA: Standard Encoder lacks field descriptions 
-                        // for custom fields, causing it to reject the whole message.
-                        if (message.developerFields) {
-                            delete message.developerFields;
-                        }
-
-                        // 4. MANUAL CLEAN: Some SDK versions leave virtual helper fields
-                        for (const key in message) {
-                            if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
-                                delete message[key];
-                            }
-                        }
-
                         try {
-                            // 5. WRITE: mesgNum + Cleaned message object
+                            // 3. Official write method: onMesg(mesgNum, data)
+                            // This ensures the encoder handles the Definition Message automatically.
                             encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                            // Log the exact field causing rejection in F12 Console
+                            console.error(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
                         }
                     }
                 });
 
+                // 4. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Ensure the input is a standard Activity file.");
+                if (count === 0) throw new Error("Encoder rejected all messages. Check Console (F12) for 'cause'.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -111,9 +100,8 @@
 
             } catch (err) {
                 console.error("SDK Process Error:", err);
-                let detail = err.cause ? `\nCause: ${JSON.stringify(err.cause, null, 2)}` : "";
-                statusBox.innerHTML = "❌ Error: " + err.message + detail;
-                statusBox.className = "status error";
+                let causeInfo = err.cause ? `\nCause: ${JSON.stringify(err.cause, null, 2)}` : "";
+                statusBox.innerHTML = `<p class="error">❌ Error: ${err.message}${causeInfo}</p>`;
             } finally {
                 runBtn.disabled = false;
             }
