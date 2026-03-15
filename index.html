@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Strava & Garmin v21.195.0)</title>
+    <title>FIT Time Shifter (v21.195.00 Final)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; font-size: 0.8rem; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; font-size: 0.85rem; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
@@ -17,7 +17,7 @@
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select .fit file:</label>
+        <label>1. Select Strava .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
@@ -27,7 +27,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.0';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.00';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,73 +39,71 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.innerHTML = "⏳ Decoding and cleaning records...";
             statusBox.className = "status";
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
+                
+                // 1. Decode EVERYTHING at once. Your decoder.js returns {messages, errors}
+                const result = decoder.read({
+                    convertDateTimesToDates: false, 
+                    convertUnits: false,
+                    expandComponents: false
+                });
+
+                const messages = result.messages;
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Read using the options defined in your decoder.js
-                decoder.read({
-                    convertDateTimesToDates: false, // KEEP RAW NUMBERS
-                    convertTypesToStrings: false,   // KEEP RAW NUMBERS
-                    applyScaleAndOffset: true,      // Required for correct values
-                    mesgListener: (mesgNum, message) => {
-                        
-                        // 2. Shift timestamps
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                // 2. Loop through the decoded messages object
+                for (const mesgName in messages) {
+                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
+                    if (mesgNum === undefined) continue;
 
-                        // 3. THE "STRAVA" FIX: Create a clean whitelist object
-                        // We ONLY pass fields that are Numbers, Strings, or Booleans.
-                        // This automatically strips Developer Data and problematic SDK objects.
+                    messages[mesgName].forEach(msg => {
+                        // Apply time shift
+                        if (msg.timestamp !== undefined) msg.timestamp += offset;
+                        if (msg.startTime !== undefined) msg.startTime += offset;
+                        if (msg.startDate !== undefined) msg.startDate += offset;
+
+                        // 3. WHITELIST: Only keep primitive fields (Numbers/Strings)
+                        // This prevents Strava's 'developer' junk from breaking the Encoder
                         const cleanMsg = {};
-                        for (const key in message) {
-                            const val = message[key];
-
-                            // Skip expanded fields and metadata
-                            if (key.includes('enhanced') || key.endsWith('_units') || key.endsWith('_date')) {
-                                continue;
-                            }
-
-                            // Only copy acceptable basic types
+                        for (const key in msg) {
+                            const val = msg[key];
+                            if (key.includes('enhanced') || key.includes('developer') || key.endsWith('_units')) continue;
+                            
                             if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
                                 cleanMsg[key] = val;
                             }
                         }
 
-                        // 4. Final SDK cleanup
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(cleanMsg);
                         }
 
                         try {
-                            // 5. Pipe to Encoder using the (ID, DATA) format
+                            // 4. Pipe to Encoder
                             encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            // Skip records the encoder refuses to write (like custom Strava fields)
-                            console.warn(`Record ${mesgNum} skipped: ${e.message}`);
+                            console.warn(`Skipped ${mesgName}:`, e.message);
                         }
-                    }
-                });
+                    });
+                }
 
-                const result = encoder.close();
-                if (count === 0) throw new Error("No records were successfully processed.");
+                const finalFit = encoder.close();
+                if (count === 0) throw new Error("The Encoder rejected every record.");
 
-                const blob = new Blob([result], { type: "application/octet-stream" });
+                const blob = new Blob([finalFit], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `shifted_${file.name}`;
-                document.body.appendChild(a);
                 a.click();
-                document.body.removeChild(a);
 
                 statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                 statusBox.className = "status success";
