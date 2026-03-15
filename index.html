@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Stable)</title>
+    <title>FIT Time Shifter (Deep Clean)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift & Download</button>
+        <button id="runBtn">Clean & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=stable';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_clean';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,9 +37,9 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            const file = fileInput.files[0]; // Targeted first file
+            const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Shifting timestamps...";
+            statusBox.innerHTML = "⏳ Stripping and shifting data...";
             statusBox.className = "status";
 
             try {
@@ -49,36 +49,42 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // CLASSIC METHOD: Passes a listener object to the read function
+                // 1. Strict raw settings
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // Apply time shift
+                        // 2. SHIFT TIMESTAMPS
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // CRITICAL: Clean the data so the encoder accepts it
+                        // 3. THE CRITICAL CLEAN: Strip everything that isn't a raw field
+                        // If Utils.removeExpandedFields fails, we manually strip strings.
                         if (typeof Utils !== 'undefined' && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(message);
                         }
+                        
+                        // Delete common "helper" fields that break the Encoder
+                        delete message.timestamp_date;
+                        delete message.start_time_date;
 
                         try {
-                            // Link mesgNum to data
+                            // 4. Write to encoder
                             encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn("Skipped record:", mesgNum);
+                            // Log exactly why it failed in F12 Console
+                            console.warn(`Encoder rejected record ${mesgNum}: ${e.message}`);
                         }
                     }
                 });
 
-                // Finalize the binary file
+                // 5. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No records were written. The decoder didn't find any data.");
+                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
