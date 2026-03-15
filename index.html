@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Deep Clean)</title>
+    <title>FIT Time Shifter (v21.195.00)</title>
     <style>
-        body { font-family: system-ui, -apple-system, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
@@ -21,13 +21,14 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Sanitise and Download</button>
+        <button id="runBtn">Adjust and Download</button>
     </div>
 
-    <div id="statusBox" class="status">Ready</div>
+    <div id="statusBox" class="status">Waiting for file...</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_clean';
+        // Import from the latest SDK files you downloaded
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.00';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,7 +40,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Stripping expanded fields...";
+            statusBox.innerHTML = "⏳ Processing records...";
             statusBox.className = "status";
 
             try {
@@ -49,54 +50,41 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Decoder MUST use raw settings for the encoder to accept data
+                // 1. Strict raw decoding is mandatory for re-encoding
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // 2. SHIFT TIMESTAMPS (Raw FIT seconds)
+                        // 2. Apply the shift to the raw numeric timestamp
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. THE CRITICAL CLEAN: Strip everything that isn't a raw binary field
-                        if (typeof Utils !== 'undefined' && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(message); // Standard SDK method
-                        }
-                        
-                        // 4. MANUAL SANITISER: Delete any fields the Encoder might choke on
-                        for (const key in message) {
-                            // Delete virtual date fields added by some decoder versions
-                            if (key.endsWith('_date') || key.endsWith('_units')) {
-                                delete message[key];
-                            }
-                            // Delete non-numeric/string fields (objects/arrays) that break encoding
-                            const val = message[key];
-                            if (typeof val === 'object' && val !== null && !(val instanceof Array)) {
-                                delete message[key];
-                            }
-                        }
+                        // 3. Mandatory Clean: Remove computed/expanded fields
+                        Utils.removeExpandedFields(message);
 
                         try {
-                            // 5. Official write method
+                            // 4. IMPORTANT: onMesg(mesgNum, message) is the required format
                             encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn(`Record ${mesgNum} rejected: ${e.message}`);
+                            // Detailed logging for why a specific record failed
+                            console.error(`Record ${mesgNum} rejected. Reason: ${e.message}`, e.cause);
                         }
                     }
                 });
 
+                // 5. Finalise and Download
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
+                if (count === 0) throw new Error("Encoder rejected all messages. Check Console (F12) for 'cause'.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = "shifted_" + file.name;
+                a.download = `shifted_${file.name}`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
