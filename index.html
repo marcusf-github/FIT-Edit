@@ -2,47 +2,47 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Custom)</title>
+    <title>FIT Time Shifter (Fixed)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5; max-width: 800px; margin: 0 auto; }
         .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
-        .status { margin-top: 20px; padding: 10px; border-radius: 4px; }
+        .status { margin-top: 20px; padding: 10px; border-radius: 4px; font-weight: bold; }
         .error { background: #fee; color: #b00; border: 1px solid #fcc; }
         .success { background: #efe; color: #080; border: 1px solid #cfc; }
-        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
-        button:hover { background: #0056b3; }
-        input { padding: 8px; margin-bottom: 10px; width: 100%; box-sizing: border-box; }
+        button { padding: 12px 24px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #218838; }
+        input { padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; }
     </style>
 </head>
 <body>
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select local .fit file:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
 
         <label>2. Shift time by (seconds):</label>
-        <input type="number" id="offset" value="0" placeholder="e.g. 3600 for +1 hour">
-        <p><small>Positive = Future | Negative = Past</small></p>
+        <input type="number" id="offset" value="0">
+        <p><small>Example: 3600 shifts forward 1 hour. -60 shifts back 1 minute.</small></p>
 
-        <button id="runBtn">Shift & Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Initializing SDK...</div>
+    <div id="statusBox" class="status">Waiting for SDK...</div>
 
-    <!-- We add a random version number to index.js to force GitHub to refresh it -->
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile } from './index.js?v=1';
+        // Import everything needed from your local index.js
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=2';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
 
-        // Check if SDK loaded
-        if (Decoder && Encoder && Profile) {
-            statusBox.innerHTML = "✅ Garmin SDK Loaded Successfully.";
+        // Check if SDK is alive
+        if (Decoder && Encoder) {
+            statusBox.innerHTML = "✅ SDK Ready";
             statusBox.className = "status success";
         } else {
-            statusBox.innerHTML = "❌ Error: SDK Files missing or index.js path incorrect.";
+            statusBox.innerHTML = "❌ SDK Error: Files not found in /src folder";
             statusBox.className = "status error";
         }
 
@@ -50,44 +50,57 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (!fileInput.files[0]) return alert("Please select a file.");
+            if (fileInput.files.length === 0) return alert("Please select a file.");
 
-            statusBox.innerHTML = "⏳ Processing file... please wait.";
+            statusBox.innerHTML = "⏳ Processing... check browser console (F12) for logs.";
             statusBox.className = "status";
 
             try {
                 const file = fileInput.files[0];
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
-                const decoder = new Decoder(stream);
                 
-                // 1. Decode the file
-                const { messages } = decoder.read();
-                const encoder = new Encoder();
+                // CRITICAL: We tell the decoder to keep RAW numeric values (no Dates, no units)
+                const decoder = new Decoder(stream);
+                const { messages } = decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false
+                });
 
-                // 2. Loop through message categories (record, lap, session, etc.)
+                const encoder = new Encoder();
+                let messageCount = 0;
+
+                // Loop through each message type (record, lap, session, etc.)
                 for (const mesgName in messages) {
                     const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                    
-                    // Skip if the message type is not recognized by the SDK Profile
                     if (mesgNum === undefined) continue;
 
                     messages[mesgName].forEach(msg => {
-                        // Apply time shift to any standard time field
+                        // Apply the shift to raw FIT seconds (uint32)
                         if (msg.timestamp !== undefined) msg.timestamp += offset;
                         if (msg.startTime !== undefined) msg.startTime += offset;
                         if (msg.startDate !== undefined) msg.startDate += offset;
 
-                        // Use writeMesg with the mesgNum injected
-                        // This is the most reliable way for the latest Garmin JS SDK
-                        encoder.writeMesg({
-                            mesgNum: mesgNum,
-                            ...msg
-                        });
+                        // Create the message object for the encoder
+                        const finalMsg = {
+                            ...msg,
+                            mesgNum: mesgNum
+                        };
+
+                        // Use writeMesg to pack the data back into binary
+                        encoder.writeMesg(finalMsg);
+                        messageCount++;
                     });
                 }
 
-                // 3. Close encoder and get the final binary blob
+                console.log(`Successfully wrote ${messageCount} messages.`);
+
+                if (messageCount === 0) {
+                    throw new Error("No messages were written to the file.");
+                }
+
+                // Finalize and download
                 const result = encoder.close();
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -99,11 +112,11 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = "✅ Success! File downloaded.";
+                statusBox.innerHTML = `✅ Done! Wrote ${messageCount} messages.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error(err);
+                console.error("Full Error Object:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
