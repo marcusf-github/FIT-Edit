@@ -2,16 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Fixed)</title>
+    <title>FIT Time Shifter (Final Fix)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5; max-width: 800px; margin: 0 auto; }
-        .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
-        .status { margin-top: 20px; padding: 10px; border-radius: 4px; font-weight: bold; }
-        .error { background: #fee; color: #b00; border: 1px solid #fcc; }
-        .success { background: #efe; color: #080; border: 1px solid #cfc; }
-        button { padding: 12px 24px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
-        button:hover { background: #218838; }
-        input { padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5; max-width: 700px; margin: 0 auto; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 0.9rem; }
+        .error { background: #fff0f0; color: #d00; border: 1px solid #fcc; }
+        .success { background: #f0fff4; color: #2d6a4f; border: 1px solid #b7e4c7; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
 <body>
@@ -21,28 +21,26 @@
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
 
-        <label>2. Shift time by (seconds):</label>
+        <label>2. Shift time (seconds):</label>
         <input type="number" id="offset" value="0">
-        <p><small>Example: 3600 shifts forward 1 hour. -60 shifts back 1 minute.</small></p>
-
+        
         <button id="runBtn">Process & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting for SDK...</div>
+    <div id="statusBox" class="status">Initializing SDK...</div>
 
     <script type="module">
-        // Import everything needed from your local index.js
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=2';
+        import { Decoder, Stream, Encoder } from './index.js?v=final';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
 
-        // Check if SDK is alive
+        // Verify SDK files are reachable
         if (Decoder && Encoder) {
             statusBox.innerHTML = "✅ SDK Ready";
             statusBox.className = "status success";
         } else {
-            statusBox.innerHTML = "❌ SDK Error: Files not found in /src folder";
+            statusBox.innerHTML = "❌ SDK Error: Files missing in /src folder";
             statusBox.className = "status error";
         }
 
@@ -50,58 +48,47 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Please select a file.");
+            if (fileInput.files.length === 0) return alert("Select a file first.");
 
-            statusBox.innerHTML = "⏳ Processing... check browser console (F12) for logs.";
+            runBtn.disabled = true;
+            statusBox.innerHTML = "⏳ Processing... (Check Console F12 for details)";
             statusBox.className = "status";
 
             try {
                 const file = fileInput.files[0];
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
-                
-                // CRITICAL: We tell the decoder to keep RAW numeric values (no Dates, no units)
                 const decoder = new Decoder(stream);
-                const { messages } = decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false
+                const encoder = new Encoder();
+
+                let count = 0;
+
+                // CRITICAL: We use 'mesgListener' to intercept messages as they are decoded
+                // This ensures we get RAW numeric data that the encoder can immediately accept
+                decoder.read({
+                    mesgListener: (mesgNum, message) => {
+                        // 1. Shift timestamps in the raw message object
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
+
+                        // 2. Direct write to encoder
+                        // Use onMesg(mesgNum, message) for maximum compatibility
+                        encoder.onMesg(mesgNum, message);
+                        count++;
+                    }
                 });
 
-                const encoder = new Encoder();
-                let messageCount = 0;
+                console.log(`Processed ${count} messages.`);
 
-                // Loop through each message type (record, lap, session, etc.)
-                for (const mesgName in messages) {
-                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                    if (mesgNum === undefined) continue;
+                if (count === 0) throw new Error("No data found in file.");
 
-                    messages[mesgName].forEach(msg => {
-                        // Apply the shift to raw FIT seconds (uint32)
-                        if (msg.timestamp !== undefined) msg.timestamp += offset;
-                        if (msg.startTime !== undefined) msg.startTime += offset;
-                        if (msg.startDate !== undefined) msg.startDate += offset;
-
-                        // Create the message object for the encoder
-                        const finalMsg = {
-                            ...msg,
-                            mesgNum: mesgNum
-                        };
-
-                        // Use writeMesg to pack the data back into binary
-                        encoder.writeMesg(finalMsg);
-                        messageCount++;
-                    });
-                }
-
-                console.log(`Successfully wrote ${messageCount} messages.`);
-
-                if (messageCount === 0) {
-                    throw new Error("No messages were written to the file.");
-                }
-
-                // Finalize and download
+                // 3. Close & Finalize
                 const result = encoder.close();
+                
+                // If result is small (< 100 bytes), something went wrong with the write
+                if (result.length < 100) throw new Error("Encoder failed to write data records.");
+
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 
@@ -112,13 +99,15 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Done! Wrote ${messageCount} messages.`;
+                statusBox.innerHTML = `✅ Done! Wrote ${count} records. File size: ${(result.length/1024).toFixed(1)} KB`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("Full Error Object:", err);
+                console.error("SDK Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
+            } finally {
+                runBtn.disabled = false;
             }
         });
     </script>
