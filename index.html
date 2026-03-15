@@ -2,15 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (v21.195.00 Fixed)</title>
+    <title>FIT Time Shifter v21.195.00</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; white-space: pre-wrap; text-align: left; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -28,8 +27,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import all required components from the local SDK
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=21.195.00';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=final';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -41,7 +39,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             
             runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
+            statusBox.innerHTML = "⏳ Scanning file records...";
             statusBox.className = "status";
 
             try {
@@ -49,55 +47,39 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // Initialize Encoder. By default, it uses Protocol V1.0. 
-                // Modern files with Developer Data may require V2.0.
-                const encoder = new Encoder(); 
+                const encoder = new Encoder();
                 let count = 0;
 
-                // 1. RAW DECODING: Required to prevent 'Encoder rejected' errors
-                decoder.read({
-                    convertTimestamp: false, // Keep as raw FIT Epoch seconds (uint32)
-                    convertUnits: false,     // Keep as raw binary values
-                    expandComponents: false, // Do not create virtual fields
-                    mesgListener: (mesgNum, message) => {
-                        
-                        // 2. SHIFT TIMESTAMPS
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                // FIX: Latest SDK uses an ASYNC ITERATOR.
+                // We must use 'for await' to extract messages one by one.
+                for await (const { mesgNum, message } of decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false
+                })) {
+                    
+                    // 1. Shift Timestamps
+                    if (message.timestamp !== undefined) message.timestamp += offset;
+                    if (message.startTime !== undefined) message.startTime += offset;
+                    if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. STRIP EXPANDED FIELDS (Standard SDK Method)
-                        // This removes computed fields that were not in the original file.
-                        if (Utils && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(message);
-                        }
-
-                        // 4. MANUAL SANITIZER: Some SDK versions leave virtual fields.
-                        // We delete any property that isn't a raw field number or standard name.
-                        for (const key in message) {
-                            if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
-                                delete message[key];
-                            }
-                        }
-
-                        try {
-                            // 5. WRITE: Official method (mesgNum + Cleaned message object)
-                            encoder.onMesg(mesgNum, message);
-                            count++;
-                        } catch (e) {
-                            // Logs the specific field causing rejection in F12 Console
-                            console.error(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
-                            // Some fields like productName may exceed MAX_FIELD_SIZE (255)
-                        }
+                    // 2. Clean the record (Removes virtual fields that break Encoder)
+                    if (Utils && Utils.removeExpandedFields) {
+                        Utils.removeExpandedFields(message);
                     }
-                });
 
-                // 6. FINALIZE
+                    // 3. Write to Encoder
+                    try {
+                        encoder.onMesg(mesgNum, message);
+                        count++;
+                    } catch (e) {
+                        console.warn(`Skipped record ${mesgNum}:`, e.message);
+                    }
+                }
+
+                if (count === 0) throw new Error("No data records were found in the file.");
+
                 const result = encoder.close();
-
-                if (count === 0) throw new Error("Encoder rejected all records. Check Console (F12) for 'cause'.");
-
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
