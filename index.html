@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Strava-Safe)</title>
+    <title>FIT Time Shifter (Deep Clean)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f4f7f6; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; font-size: 0.8rem; white-space: pre-wrap; }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift and Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=strava_fix';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=deep_clean';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,26 +37,26 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            
-            statusBox.innerHTML = "⏳ Stripping Strava metadata...";
+            const file = fileInput.files[0];
+
+            statusBox.innerHTML = "⏳ Stripping non-standard data...";
             statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0];
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Force RAW decoding (No Dates, No Units)
+                // 1. Force RAW decoding
                 const { messages } = decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false
                 });
 
-                // 2. Loop through all message types
+                // 2. Loop through all message types (record, lap, session, etc.)
                 for (const mesgName in messages) {
                     const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
                     if (mesgNum === undefined) continue;
@@ -67,52 +67,54 @@
                         if (msg.startTime !== undefined) msg.startTime += offset;
                         if (msg.startDate !== undefined) msg.startDate += offset;
 
-                        // 4. THE FIX: Create a CLEAN Whitelist Object
+                        // 4. THE WHITELIST REBUILD:
+                        // We ONLY copy fields that are part of the standard profile 
+                        // and are primitive types (Number/String).
                         const cleanMsg = {};
                         for (const key in msg) {
-                            // SKIP fields that cause Encoder Rejection:
-                            // - Enhanced fields (Strava adds these)
-                            // - Developer data (Strava's 'Relative Effort', etc)
-                            // - Virtual units/dates
+                            const val = msg[key];
+
+                            // REJECT list: Strava metadata and SDK "Helper" fields
                             if (key.includes('enhanced') || 
                                 key.includes('developer') || 
+                                key.includes('unknown') ||
                                 key.endsWith('_units') || 
                                 key.endsWith('_date')) {
                                 continue;
                             }
 
-                            // ONLY accept raw numbers, strings, or booleans
-                            const val = msg[key];
+                            // ACCEPT list: Only simple data types
                             if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
                                 cleanMsg[key] = val;
                             }
                         }
 
-                        // Final safety strip
+                        // Remove standard expanded fields just in case
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(cleanMsg);
                         }
 
                         try {
+                            // 5. Official write method
                             encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            // Log specifically which message failed
+                            // Log specific rejection reason in F12 console
                             console.warn(`Skipped ${mesgName} record:`, e.message);
                         }
                     });
                 }
 
-                // 5. Finalize
+                // 6. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all records. Try a different file.");
+                if (count === 0) throw new Error("The Encoder rejected every record. Check Console (F12) for detailed causes.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
+                a.download = "shifted_" + file.name;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
