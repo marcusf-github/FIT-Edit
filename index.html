@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Deep Repair)</title>
+    <title>FIT Time Shifter (Async v21)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f4f7f6; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
-        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .status { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #b00; border: 1px solid #fcc; }
+        .success { background: #f4fce3; color: #2f9e44; border: 1px solid #b2f2bb; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -17,18 +17,17 @@
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select local .fit file:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift time by (seconds):</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Repair and Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting for file...</div>
+    <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import all necessary tools from the official SDK
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=deep_repair';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=21';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,10 +36,10 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Please select a file!");
+            if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.innerHTML = "⏳ Processing (Modern Async)...";
             statusBox.className = "status";
 
             try {
@@ -50,36 +49,30 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Decoder settings must be STRICT RAW for the encoder to accept data
-                decoder.read({
-                    convertTimestamp: false, 
+                // 1. The newest SDK uses an Async Iterator. 
+                // We must use 'for await' to "pull" the messages out of the file.
+                for await (const { mesgNum, message } of decoder.read({
+                    convertTimestamp: false,
                     convertUnits: false,
-                    expandComponents: false,
-                    convertTypesToStrings: false,
-                    mesgListener: (mesgNum, message) => {
-                        // 2. Apply time shift to raw numeric timestamps
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                    expandComponents: false
+                })) {
+                    // Apply time shift
+                    if (message.timestamp !== undefined) message.timestamp += offset;
+                    if (message.startTime !== undefined) message.startTime += offset;
+                    if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. Strip any expanded "helper" fields that cause encoder rejection
-                        Utils.removeExpandedFields(message);
+                    // Clean the message of "expanded" fields that break the encoder
+                    Utils.removeExpandedFields(message);
 
-                        try {
-                            // 4. Use onMesg with TWO arguments: mesgNum and cleaned message data
-                            encoder.onMesg(mesgNum, message);
-                            count++;
-                        } catch (e) {
-                            console.warn(`Encoder rejected record ${mesgNum}:`, e.message);
-                        }
-                    }
-                });
+                    // Write directly to encoder
+                    encoder.onMesg(mesgNum, message);
+                    count++;
+                }
 
-                // 5. Finalize and check results
+                // 2. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Check browser console (F12) for details.");
-                if (result.length < 500) throw new Error(`File too small (${result.length} bytes). Processing failed.`);
+                if (count === 0) throw new Error("No data records found in file.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -94,7 +87,7 @@
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Process Error:", err);
+                console.error("SDK Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
