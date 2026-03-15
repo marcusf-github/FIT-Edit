@@ -1,98 +1,119 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>FIT Time Shifter (Deep Clean)</title>
+    <meta charset="UTF-8">
+    <title>FIT Time Shifter (Strava & Garmin v21.195.0)</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; line-height: 1.5; }
-        .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
-        .status { margin-top: 20px; padding: 10px; border-radius: 4px; font-weight: bold; }
-        .error { background: #fee; color: #b00; }
-        .success { background: #efe; color: #080; }
-        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; font-size: 0.8rem; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
 <body>
-    <h2>FIT Time Shifter</h2>
+
+    <h1>FIT Time Shifter</h1>
     <div class="card">
-        <input type="file" id="fileInput" accept=".fit"><br><br>
-        <label>Shift (seconds): </label>
-        <input type="number" id="offset" value="0"><br><br>
-        <button id="runBtn">Shift & Download</button>
+        <label>1. Select .fit file:</label>
+        <input type="file" id="fileInput" accept=".fit">
+        <label>2. Shift seconds:</label>
+        <input type="number" id="offset" value="0">
+        <button id="runBtn">Adjust and Download</button>
     </div>
-    <div id="status" class="status">Ready</div>
+
+    <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import Profile to get the list of "Legal" fields
-        import { Decoder, Stream, Encoder, Profile } from './index.js?v=deepclean';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.0';
 
-        const status = document.getElementById('status');
+        const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
 
         runBtn.addEventListener('click', async () => {
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
-            if (!fileInput.files[0]) return alert("Select a file!");
 
-            status.innerText = "Processing...";
-            status.className = "status";
+            if (fileInput.files.length === 0) return alert("Select a file!");
+            const file = fileInput.files[0];
+
+            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.className = "status";
 
             try {
-                const arrayBuffer = await fileInput.files[0].arrayBuffer();
+                const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 const encoder = new Encoder();
                 let count = 0;
 
+                // 1. Read using the options defined in your decoder.js
                 decoder.read({
-                    convertTimestamp: false,
-                    convertUnits: false,
+                    convertDateTimesToDates: false, // KEEP RAW NUMBERS
+                    convertTypesToStrings: false,   // KEEP RAW NUMBERS
+                    applyScaleAndOffset: true,      // Required for correct values
                     mesgListener: (mesgNum, message) => {
-                        // 1. Shift Timestamps
+                        
+                        // 2. Shift timestamps
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. THE HARD FILTER:
-                        // Get the list of valid field names for this specific message type
-                        const validFields = Profile.getMesg(mesgNum).fields;
-                        const cleanMsg = { mesgNum: mesgNum };
+                        // 3. THE "STRAVA" FIX: Create a clean whitelist object
+                        // We ONLY pass fields that are Numbers, Strings, or Booleans.
+                        // This automatically strips Developer Data and problematic SDK objects.
+                        const cleanMsg = {};
+                        for (const key in message) {
+                            const val = message[key];
 
-                        // 3. Only copy fields that exist in the OFFICIAL Garmin Profile
-                        // This ignores all Strava "developer" and "enhanced" junk
-                        for (const fieldName in message) {
-                            if (validFields[fieldName] !== undefined) {
-                                // Double check it's a simple value (no objects/metadata)
-                                const val = message[fieldName];
-                                if (typeof val !== 'object' || val === null) {
-                                    cleanMsg[fieldName] = val;
-                                }
+                            // Skip expanded fields and metadata
+                            if (key.includes('enhanced') || key.endsWith('_units') || key.endsWith('_date')) {
+                                continue;
+                            }
+
+                            // Only copy acceptable basic types
+                            if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
+                                cleanMsg[key] = val;
                             }
                         }
 
+                        // 4. Final SDK cleanup
+                        if (Utils && Utils.removeExpandedFields) {
+                            Utils.removeExpandedFields(cleanMsg);
+                        }
+
                         try {
-                            encoder.onMesg(cleanMsg);
+                            // 5. Pipe to Encoder using the (ID, DATA) format
+                            encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            // Silently skip any record that is still "too dirty"
+                            // Skip records the encoder refuses to write (like custom Strava fields)
+                            console.warn(`Record ${mesgNum} skipped: ${e.message}`);
                         }
                     }
                 });
 
                 const result = encoder.close();
-                if (count === 0) throw new Error("No valid records found.");
+                if (count === 0) throw new Error("No records were successfully processed.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = "shifted_" + fileInput.files[0].name;
+                a.download = `shifted_${file.name}`;
+                document.body.appendChild(a);
                 a.click();
+                document.body.removeChild(a);
 
-                status.innerText = `Success! Wrote ${count} records.`;
-                status.className = "status success";
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
+                statusBox.className = "status success";
+
             } catch (err) {
-                status.innerText = "Error: " + err.message;
-                status.className = "status error";
+                console.error(err);
+                statusBox.innerHTML = "❌ Error: " + err.message;
+                statusBox.className = "status error";
             }
         });
     </script>
