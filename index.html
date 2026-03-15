@@ -2,14 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Final Compatibility)</title>
+    <title>FIT Time Shifter (Safe Mode)</title>
     <style>
-        body { font-family: sans-serif; padding: 2rem; line-height: 1.5; max-width: 600px; margin: 0 auto; background: #f4f7f6; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        body { font-family: sans-serif; padding: 2rem; line-height: 1.5; max-width: 500px; margin: 0 auto; background: #f0f2f5; }
+        .card { border: 1px solid #ccc; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
-        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        .success { background: #efe; color: #28a745; border: 1px solid #cfc; }
+        .info { background: #eef; color: #007bff; border: 1px solid #ccf; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0056b3; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -17,17 +19,17 @@
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select .fit file:</label>
+        <label>1. Select File:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift seconds:</label>
+        <label>2. Shift Seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Start Processing</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting...</div>
+    <div id="statusBox" class="status info">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=final';
+        import { Decoder, Stream, Encoder } from './index.js?v=final_safe';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -36,64 +38,64 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Select a file!");
+            if (fileInput.files.length === 0) return alert("Please select a file!");
 
+            const file = fileInput.files[0]; // Targeted correctly
             statusBox.innerHTML = "⏳ Processing...";
-            statusBox.className = "status";
+            statusBox.className = "status info";
 
             try {
-                const file = fileInput.files[0]; // Targeted first file specifically
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
+                const decoder = new Decoder(stream);
                 const encoder = new Encoder();
-                let totalCount = 0;
+                let count = 0;
 
-                // Loop through the entire stream to find all messages
-                while (stream.position < stream.length) {
-                    const decoder = new Decoder(stream);
-                    
-                    decoder.read({
-                        mesgListener: (mesgNum, message) => {
-                            // Apply time shift to raw numeric fields
-                            if (message.timestamp !== undefined) message.timestamp += offset;
-                            if (message.startTime !== undefined) message.startTime += offset;
-                            if (message.startDate !== undefined) message.startDate += offset;
+                // SAFE READ: No while loop. We use the standard read() 
+                // but pass a listener to catch data as it flows.
+                decoder.read({
+                    mesgListener: (mesgNum, message) => {
+                        // Apply time shift
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                            // REPAIR: Modern Garmin SDK onMesg expects the mesgNum inside the object
-                            message.mesgNum = mesgNum;
-                            
-                            try {
-                                encoder.onMesg(message); // Pass as a single object
-                                totalCount++;
-                            } catch (e) {
-                                // Fallback for different SDK versions
-                                encoder.onMesg(mesgNum, message);
-                                totalCount++;
-                            }
+                        // Force the ID into the message for the encoder
+                        message.mesgNum = mesgNum;
+                        
+                        try {
+                            encoder.onMesg(message);
+                            count++;
+                        } catch (e) {
+                            // Fallback if the SDK is an older version
+                            encoder.onMesg(mesgNum, message);
+                            count++;
                         }
-                    });
-                }
+                    }
+                });
 
+                // Finalize the file
                 const result = encoder.close();
 
                 if (result.length < 200) {
-                    throw new Error(`Encoder only wrote ${result.length} bytes. Check if the SDK folder structure is correct.`);
+                    throw new Error(`Output too small (${result.length} bytes). Encoder failed.`);
                 }
 
+                // Download Logic
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
+                a.download = "shifted_" + file.name;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${totalCount} records.`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Error:", err);
+                console.error("Critical Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
