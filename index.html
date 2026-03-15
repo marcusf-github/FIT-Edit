@@ -53,22 +53,36 @@
             const { messages } = decoder.read();
             const encoder = new Encoder();
 
-            // 2. Loop through every message type (e.g., 'record', 'lap')
+            // Loop through every message type (e.g., 'record', 'lap', 'deviceInfo')
             for (const mesgName in messages) {
+                // Convert the name (like 'record') to its official Number (like 20)
+                // We use .toUpperCase() because Profile.MesgNum keys are uppercase (e.g., RECORD)
                 const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                
+            
+                // If for some reason the SDK doesn't recognize the message type, skip it
+                if (mesgNum === undefined) {
+                    console.warn(`Skipping unknown message type: ${mesgName}`);
+                    continue;
+                }
+            
                 messages[mesgName].forEach(msg => {
-                    // Shift the timestamps by your X seconds
+                    // 1. Shift the timestamps
                     if (msg.timestamp) msg.timestamp += offset;
                     if (msg.startTime) msg.startTime += offset;
-
-                    // IMPORTANT: The newest SDK uses writeMesg with an object containing mesgNum
-                    encoder.writeMesg({
-                        mesgNum: mesgNum,
-                        ...msg
-                    });
+            
+                    // 2. Write the message using the NEWEST SDK format
+                    // The encoder needs the mesgNum at the top level
+                    try {
+                        encoder.writeMesg({
+                            mesgNum: mesgNum,
+                            ...msg
+                        });
+                    } catch (writeErr) {
+                        console.error(`Failed to write ${mesgName}:`, writeErr);
+                    }
                 });
             }
+
 
             // 3. Finalize the file and trigger download
             const result = encoder.close(); // Returns Uint8Array
