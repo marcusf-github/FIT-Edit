@@ -28,6 +28,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
+        // Import all required components from the local SDK
         import { Decoder, Stream, Encoder, Utils } from './index.js?v=21.195.00';
 
         const statusBox = document.getElementById('statusBox');
@@ -48,27 +49,32 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                const encoder = new Encoder();
+                
+                // Initialize Encoder. By default, it uses Protocol V1.0. 
+                // Modern files with Developer Data may require V2.0.
+                const encoder = new Encoder(); 
                 let count = 0;
 
                 // 1. RAW DECODING: Required to prevent 'Encoder rejected' errors
                 decoder.read({
-                    convertTimestamp: false, // Keep as raw FIT seconds (integers)
-                    convertUnits: false,     // Keep as raw values
+                    convertTimestamp: false, // Keep as raw FIT Epoch seconds (uint32)
+                    convertUnits: false,     // Keep as raw binary values
                     expandComponents: false, // Do not create virtual fields
                     mesgListener: (mesgNum, message) => {
                         
-                        // 2. SHIFT TIMESTAMPS (Simple math on raw integers)
+                        // 2. SHIFT TIMESTAMPS
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
                         // 3. STRIP EXPANDED FIELDS (Standard SDK Method)
+                        // This removes computed fields that were not in the original file.
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(message);
                         }
 
-                        // 4. MANUAL SANITIZER: Cleanup for problematic virtual fields
+                        // 4. MANUAL SANITIZER: Some SDK versions leave virtual fields.
+                        // We delete any property that isn't a raw field number or standard name.
                         for (const key in message) {
                             if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
                                 delete message[key];
@@ -82,7 +88,7 @@
                         } catch (e) {
                             // Logs the specific field causing rejection in F12 Console
                             console.error(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
-                            throw new Error(`Record ${mesgNum} failed: ${e.message}\nCause: ${JSON.stringify(e.cause, null, 2)}`);
+                            // Some fields like productName may exceed MAX_FIELD_SIZE (255)
                         }
                     }
                 });
@@ -90,7 +96,7 @@
                 // 6. FINALIZE
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No valid records found to encode.");
+                if (count === 0) throw new Error("Encoder rejected all records. Check Console (F12) for 'cause'.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
