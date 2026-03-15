@@ -1,109 +1,113 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>FIT Time Shifter</title>
+    <meta charset="UTF-8">
+    <title>FIT Time Shifter (Custom)</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; line-height: 1.6; }
-        .error { color: red; font-weight: bold; }
-        .success { color: green; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5; max-width: 800px; margin: 0 auto; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+        .status { margin-top: 20px; padding: 10px; border-radius: 4px; }
+        .error { background: #fee; color: #b00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #080; border: 1px solid #cfc; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #0056b3; }
+        input { padding: 8px; margin-bottom: 10px; width: 100%; box-sizing: border-box; }
     </style>
 </head>
 <body>
-    <h2>1. Upload FIT File</h2>
-    <input type="file" id="fileInput" accept=".fit">
-    
-    <h2>2. Set Time Shift</h2>
-    <label>Shift by (seconds): </label>
-    <input type="number" id="offset" value="0">
-    <p><small>Use positive numbers to move forward, negative to move back.</small></p>
 
-    <button id="runBtn" style="padding: 10px 20px; cursor: pointer;">Shift and Download</button>
-    
-    <div id="status"></div>
+    <h1>FIT Time Shifter</h1>
+    <div class="card">
+        <label>1. Select local .fit file:</label>
+        <input type="file" id="fileInput" accept=".fit">
 
-<script type="module">
-    // Load the official SDK manager
-    import { Decoder, Stream, Encoder, Profile } from './index.js'; 
+        <label>2. Shift time by (seconds):</label>
+        <input type="number" id="offset" value="0" placeholder="e.g. 3600 for +1 hour">
+        <p><small>Positive = Future | Negative = Past</small></p>
 
-    const status = document.getElementById('status');
-    const runBtn = document.getElementById('runBtn');
+        <button id="runBtn">Shift & Download</button>
+    </div>
 
-    // 1. Check if SDK is actually loaded
-    if (!Decoder || !Encoder) {
-        status.innerHTML = '<p style="color:red">Error: SDK files not found. Check if index.js is in this folder.</p>';
-    } else {
-        status.innerHTML = '<p style="color:green">Garmin SDK Loaded Successfully!</p>';
-    }
+    <div id="statusBox" class="status">Initializing SDK...</div>
 
-    runBtn.addEventListener('click', async () => {
-        const fileElement = document.getElementById('fileInput');
-        const offset = parseInt(document.getElementById('offset').value) || 0;
+    <!-- We add a random version number to index.js to force GitHub to refresh it -->
+    <script type="module">
+        import { Decoder, Stream, Encoder, Profile } from './index.js?v=1';
 
-        if (fileElement.files.length === 0) return alert("Select a .fit file!");
-        
-        const file = fileElement.files[0];
-        status.innerHTML = "Processing... please wait.";
+        const statusBox = document.getElementById('statusBox');
+        const runBtn = document.getElementById('runBtn');
 
-        try {
-            const arrayBuffer = await file.arrayBuffer();
-            const stream = Stream.fromArrayBuffer(arrayBuffer);
-            const decoder = new Decoder(stream);
-            
-            // Decode the file into a messages object
-            const { messages } = decoder.read();
-            const encoder = new Encoder();
+        // Check if SDK loaded
+        if (Decoder && Encoder && Profile) {
+            statusBox.innerHTML = "✅ Garmin SDK Loaded Successfully.";
+            statusBox.className = "status success";
+        } else {
+            statusBox.innerHTML = "❌ Error: SDK Files missing or index.js path incorrect.";
+            statusBox.className = "status error";
+        }
 
-            // Loop through every message type (e.g., 'record', 'lap', 'deviceInfo')
-            for (const mesgName in messages) {
-                // Convert the name (like 'record') to its official Number (like 20)
-                // We use .toUpperCase() because Profile.MesgNum keys are uppercase (e.g., RECORD)
-                const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-            
-                // If for some reason the SDK doesn't recognize the message type, skip it
-                if (mesgNum === undefined) {
-                    console.warn(`Skipping unknown message type: ${mesgName}`);
-                    continue;
-                }
-            
-                messages[mesgName].forEach(msg => {
-                    // 1. Shift the timestamps
-                    if (msg.timestamp) msg.timestamp += offset;
-                    if (msg.startTime) msg.startTime += offset;
-            
-                    // 2. Write the message using the NEWEST SDK format
-                    // The encoder needs the mesgNum at the top level
-                    try {
+        runBtn.addEventListener('click', async () => {
+            const fileInput = document.getElementById('fileInput');
+            const offset = parseInt(document.getElementById('offset').value) || 0;
+
+            if (!fileInput.files[0]) return alert("Please select a file.");
+
+            statusBox.innerHTML = "⏳ Processing file... please wait.";
+            statusBox.className = "status";
+
+            try {
+                const file = fileInput.files[0];
+                const arrayBuffer = await file.arrayBuffer();
+                const stream = Stream.fromArrayBuffer(arrayBuffer);
+                const decoder = new Decoder(stream);
+                
+                // 1. Decode the file
+                const { messages } = decoder.read();
+                const encoder = new Encoder();
+
+                // 2. Loop through message categories (record, lap, session, etc.)
+                for (const mesgName in messages) {
+                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
+                    
+                    // Skip if the message type is not recognized by the SDK Profile
+                    if (mesgNum === undefined) continue;
+
+                    messages[mesgName].forEach(msg => {
+                        // Apply time shift to any standard time field
+                        if (msg.timestamp !== undefined) msg.timestamp += offset;
+                        if (msg.startTime !== undefined) msg.startTime += offset;
+                        if (msg.startDate !== undefined) msg.startDate += offset;
+
+                        // Use writeMesg with the mesgNum injected
+                        // This is the most reliable way for the latest Garmin JS SDK
                         encoder.writeMesg({
                             mesgNum: mesgNum,
                             ...msg
                         });
-                    } catch (writeErr) {
-                        console.error(`Failed to write ${mesgName}:`, writeErr);
-                    }
-                });
+                    });
+                }
+
+                // 3. Close encoder and get the final binary blob
+                const result = encoder.close();
+                const blob = new Blob([result], { type: "application/octet-stream" });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `shifted_${file.name}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+
+                statusBox.innerHTML = "✅ Success! File downloaded.";
+                statusBox.className = "status success";
+
+            } catch (err) {
+                console.error(err);
+                statusBox.innerHTML = "❌ Error: " + err.message;
+                statusBox.className = "status error";
             }
-
-
-            // 3. Finalize the file and trigger download
-            const result = encoder.close(); // Returns Uint8Array
-            const blob = new Blob([result], { type: "application/octet-stream" });
-            const url = URL.createObjectURL(blob);
-            
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = "shifted_" + file.name;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            
-            status.innerHTML = '<p style="color:green">Success! File downloaded.</p>';
-        } catch (err) {
-            console.error(err);
-            status.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
-            alert("Processing failed: " + err.message);
-        }
-    });
-</script>
-
+        });
+    </script>
 </body>
 </html>
