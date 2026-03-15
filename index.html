@@ -2,15 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter v21.195.00</title>
+    <title>FIT Time Shifter (Deep Clean)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fff0f0; color: #d00; border: 1px solid #fcc; text-align: left; font-family: monospace; white-space: pre-wrap; font-size: 0.8rem; }
-        .success { background: #f0fff4; color: #2d6a4f; border: 1px solid #b7e4c7; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; white-space: pre-wrap; text-align: left; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -20,15 +19,15 @@
     <div class="card">
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift time (seconds):</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
         <button id="runBtn">Adjust and Download</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting for SDK...</div>
+    <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=21.195.00';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=final_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,10 +36,10 @@
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Select a file first.");
-
+            if (fileInput.files.length === 0) return alert("Select a file!");
+            
             runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
             statusBox.className = "status";
 
             try {
@@ -51,40 +50,55 @@
                 const encoder = new Encoder(); 
                 let count = 0;
 
-                // DEEP SCAN: Intercept every message as it is decoded
+                // 1. RAW DECODING: Required to prevent re-encoding errors
                 decoder.read({
-                    convertTimestamp: false, // Keep as raw numeric seconds
-                    convertUnits: false,     // Disable human-readable units
-                    expandComponents: false, // Keep raw data structure
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false,
                     mesgListener: (mesgNum, message) => {
                         
-                        // 1. Shift Timestamps (Raw FIT Epoch seconds)
+                        // 2. SHIFT TIMESTAMPS (Raw numeric math)
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. THE CRITICAL FIX: Remove computed/expanded fields
-                        // These are 'virtual' fields that cause the encoder to crash.
+                        // 3. DEEP CLEAN: Only keep real binary fields
+                        // We delete anything that the Decoder added for "convenience"
+                        const cleanMessage = {};
+                        for (const key in message) {
+                            // Skip fields that are strings but should be numbers (like enhanced_speed)
+                            // Skip anything ending in _units or _date
+                            if (key.endsWith('_units') || key.endsWith('_date') || key.startsWith('enhanced_')) {
+                                continue;
+                            }
+
+                            // Only keep basic values (Numbers, Strings, Booleans)
+                            // This strips the "extra" SDK objects that cause rejections
+                            const val = message[key];
+                            if (typeof val !== 'object' || val === null || Array.isArray(val)) {
+                                cleanMessage[key] = val;
+                            }
+                        }
+
+                        // 4. STRIP EXPANDED FIELDS (Official SDK Method)
                         if (Utils && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(message);
+                            Utils.removeExpandedFields(cleanMessage);
                         }
 
                         try {
-                            // 3. Official write method: onMesg(mesgNum, data)
-                            // This ensures the encoder handles the Definition Message automatically.
-                            encoder.onMesg(mesgNum, message);
+                            // 5. WRITE: mesgNum + Cleaned message object
+                            encoder.onMesg(mesgNum, cleanMessage);
                             count++;
                         } catch (e) {
-                            // Log the exact field causing rejection in F12 Console
-                            console.error(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                            console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
                         }
                     }
                 });
 
-                // 4. Finalize
+                // 6. FINALIZE
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Check Console (F12) for 'cause'.");
+                if (count === 0) throw new Error("No records were accepted by the Encoder.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -99,9 +113,9 @@
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Process Error:", err);
-                let causeInfo = err.cause ? `\nCause: ${JSON.stringify(err.cause, null, 2)}` : "";
-                statusBox.innerHTML = `<p class="error">❌ Error: ${err.message}${causeInfo}</p>`;
+                console.error("Full Error:", err);
+                statusBox.innerHTML = `❌ Error: ${err.message}`;
+                statusBox.className = "status error";
             } finally {
                 runBtn.disabled = false;
             }
