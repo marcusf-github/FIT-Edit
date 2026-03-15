@@ -1,73 +1,118 @@
-<script type="module">
-    // Make sure to import ProtocolVersion from your SDK
-    import { Decoder, Stream, Encoder, Profile, Utils, ProtocolVersion } from './index.js?v=21.195.00';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FIT Time Shifter (v21.195.00 Fixed)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:disabled { background: #ccc; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    </style>
+</head>
+<body>
 
-    const statusBox = document.getElementById('statusBox');
-    const runBtn = document.getElementById('runBtn');
+    <h1>FIT Time Shifter</h1>
+    <div class="card">
+        <label>1. Select .fit file:</label>
+        <input type="file" id="fileInput" accept=".fit">
+        <label>2. Shift seconds:</label>
+        <input type="number" id="offset" value="0">
+        <button id="runBtn">Adjust and Download</button>
+    </div>
 
-    runBtn.addEventListener('click', async () => {
-        const fileInput = document.getElementById('fileInput');
-        const offset = parseInt(document.getElementById('offset').value) || 0;
+    <div id="statusBox" class="status">Ready</div>
 
-        if (fileInput.files.length === 0) return alert("Select a file!");
-        const file = fileInput.files[0];
+    <script type="module">
+        // Import all required components from the SDK
+        import { Decoder, Stream, Encoder, Utils, ProtocolVersion } from './index.js?v=final';
 
-        statusBox.innerHTML = "⏳ Processing records...";
-        statusBox.className = "status";
+        const statusBox = document.getElementById('statusBox');
+        const runBtn = document.getElementById('runBtn');
 
-        try {
-            const arrayBuffer = await file.arrayBuffer();
-            const stream = Stream.fromArrayBuffer(arrayBuffer);
-            const decoder = new Decoder(stream);
+        runBtn.addEventListener('click', async () => {
+            const fileInput = document.getElementById('fileInput');
+            const offset = parseInt(document.getElementById('offset').value) || 0;
+
+            if (fileInput.files.length === 0) return alert("Select a file!");
             
-            // FIX 1: Initialize with Protocol V2.0 for modern compatibility
-            const encoder = new Encoder(ProtocolVersion.V20);
-            let count = 0;
+            runBtn.disabled = true;
+            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
+            statusBox.className = "status";
 
-            decoder.read({
-                convertTimestamp: false, 
-                convertUnits: false,
-                expandComponents: false,
-                mesgListener: (mesgNum, message) => {
-                    // Shift timestamps
-                    if (message.timestamp !== undefined) message.timestamp += offset;
-                    if (message.startTime !== undefined) message.startTime += offset;
-                    if (message.startDate !== undefined) message.startDate += offset;
+            try {
+                const file = fileInput.files[0];
+                const arrayBuffer = await file.arrayBuffer();
+                const stream = Stream.fromArrayBuffer(arrayBuffer);
+                const decoder = new Decoder(stream);
+                
+                // Use Protocol V2.0 to handle modern Garmin data/developer fields
+                const encoder = new Encoder(ProtocolVersion.V20);
+                let count = 0;
 
-                    // FIX 2: Strip computed/expanded fields that break the encoder
-                    Utils.removeExpandedFields(message);
+                // 1. RAW DECODING: Essential to prevent 'Encoder rejected' errors
+                decoder.read({
+                    convertTimestamp: false, // Keep as raw FIT seconds (integers)
+                    convertUnits: false,     // Keep as raw binary values
+                    expandComponents: false, // Do not create virtual fields
+                    mesgListener: (mesgNum, message) => {
+                        
+                        // 2. SHIFT TIMESTAMPS (Simple math on raw integers)
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    try {
-                        encoder.onMesg(mesgNum, message);
-                        count++;
-                    } catch (e) {
-                        // This will now log the EXACT field causing the problem
-                        console.error(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                        // 3. STRIP EXPANDED FIELDS (Standard SDK Method)
+                        Utils.removeExpandedFields(message);
+
+                        // 4. MANUAL SANITIZER: Some SDK versions leave virtual fields
+                        // We delete any property that isn't a raw field number or standard name
+                        for (const key in message) {
+                            if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
+                                delete message[key];
+                            }
+                        }
+
+                        try {
+                            // 5. WRITE: mesgNum + Cleaned message object
+                            encoder.onMesg(mesgNum, message);
+                            count++;
+                        } catch (e) {
+                            // This logs the EXACT field causing the problem in F12 Console
+                            console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                        }
                     }
-                }
-            });
+                });
 
-            const result = encoder.close();
-            if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12) for details.");
+                // 6. FINALIZE
+                const result = encoder.close();
 
-            const blob = new Blob([result], { type: "application/octet-stream" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `shifted_${file.name}`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+                if (count === 0) throw new Error("Encoder rejected all records. Check F12 console for 'cause'.");
 
-            statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
-            statusBox.className = "status success";
+                const blob = new Blob([result], { type: "application/octet-stream" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `shifted_${file.name}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
 
-        } catch (err) {
-            // Detailed error reporting
-            console.error("Full SDK Error:", err);
-            let causeMsg = err.cause ? JSON.stringify(err.cause) : "No extra cause info";
-            statusBox.innerHTML = `❌ Error: ${err.message}. Cause: ${causeMsg}`;
-            statusBox.className = "status error";
-        }
-    });
-</script>
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
+                statusBox.className = "status success";
+
+            } catch (err) {
+                console.error("SDK Process Error:", err);
+                statusBox.innerHTML = "❌ Error: " + err.message;
+                statusBox.className = "status error";
+            } finally {
+                runBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
