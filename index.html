@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FIT Time Shifter</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; line-height: 1.6; }
+        .error { color: red; font-weight: bold; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h2>1. Upload FIT File</h2>
+    <input type="file" id="fileInput" accept=".fit">
+    
+    <h2>2. Set Time Shift</h2>
+    <label>Shift by (seconds): </label>
+    <input type="number" id="offset" value="0">
+    <p><small>Use positive numbers to move forward, negative to move back.</small></p>
+
+    <button id="runBtn" style="padding: 10px 20px; cursor: pointer;">Shift and Download</button>
+    
+    <div id="status"></div>
+
+<script type="module">
+    // Load the official SDK manager
+    import { Decoder, Stream, Encoder, Profile } from './index.js'; 
+
+    const status = document.getElementById('status');
+    const runBtn = document.getElementById('runBtn');
+
+    // 1. Check if SDK is actually loaded
+    if (!Decoder || !Encoder) {
+        status.innerHTML = '<p style="color:red">Error: SDK files not found. Check if index.js is in this folder.</p>';
+    } else {
+        status.innerHTML = '<p style="color:green">Garmin SDK Loaded Successfully!</p>';
+    }
+
+    runBtn.addEventListener('click', async () => {
+        const fileElement = document.getElementById('fileInput');
+        const offset = parseInt(document.getElementById('offset').value) || 0;
+
+        if (fileElement.files.length === 0) return alert("Select a .fit file!");
+        
+        const file = fileElement.files[0];
+        status.innerHTML = "Processing... please wait.";
+
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const stream = Stream.fromArrayBuffer(arrayBuffer);
+            const decoder = new Decoder(stream);
+            
+            // Decode the file into a messages object
+            const { messages } = decoder.read();
+            const encoder = new Encoder();
+
+            // 2. Loop through every message type (e.g., 'record', 'lap')
+            for (const mesgName in messages) {
+                const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
+                
+                messages[mesgName].forEach(msg => {
+                    // Shift the timestamps by your X seconds
+                    if (msg.timestamp) msg.timestamp += offset;
+                    if (msg.startTime) msg.startTime += offset;
+
+                    // IMPORTANT: The newest SDK uses writeMesg with an object containing mesgNum
+                    encoder.writeMesg({
+                        mesgNum: mesgNum,
+                        ...msg
+                    });
+                });
+            }
+
+            // 3. Finalize the file and trigger download
+            const result = encoder.close(); // Returns Uint8Array
+            const blob = new Blob([result], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "shifted_" + file.name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            
+            status.innerHTML = '<p style="color:green">Success! File downloaded.</p>';
+        } catch (err) {
+            console.error(err);
+            status.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+            alert("Processing failed: " + err.message);
+        }
+    });
+</script>
+
+</body>
+</html>
