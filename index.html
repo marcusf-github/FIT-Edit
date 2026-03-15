@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Async v21)</title>
+    <title>FIT Time Shifter (Strip & Sync)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -27,7 +27,8 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=21';
+        // Import Utils - it's the key to fixing the rejection error
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=strip_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,7 +40,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Processing (Modern Async)...";
+            statusBox.innerHTML = "⏳ Stripping and shifting data...";
             statusBox.className = "status";
 
             try {
@@ -49,30 +50,35 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. The newest SDK uses an Async Iterator. 
-                // We must use 'for await' to "pull" the messages out of the file.
-                for await (const { mesgNum, message } of decoder.read({
-                    convertTimestamp: false,
+                // Use the standard listener-based read
+                decoder.read({
+                    convertTimestamp: false, 
                     convertUnits: false,
-                    expandComponents: false
-                })) {
-                    // Apply time shift
-                    if (message.timestamp !== undefined) message.timestamp += offset;
-                    if (message.startTime !== undefined) message.startTime += offset;
-                    if (message.startDate !== undefined) message.startDate += offset;
+                    expandComponents: false,
+                    mesgListener: (mesgNum, message) => {
+                        // 1. Shift the numeric timestamps
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    // Clean the message of "expanded" fields that break the encoder
-                    Utils.removeExpandedFields(message);
+                        // 2. THE CRITICAL FIX: Strip non-binary fields
+                        // This removes "helper" data that causes Encoder to reject the record.
+                        Utils.removeExpandedFields(message);
 
-                    // Write directly to encoder
-                    encoder.onMesg(mesgNum, message);
-                    count++;
-                }
+                        try {
+                            // 3. Official write method: mesgNum + data object
+                            encoder.onMesg(mesgNum, message);
+                            count++;
+                        } catch (e) {
+                            console.warn(`Encoder rejected record ${mesgNum}:`, e.message);
+                        }
+                    }
+                });
 
-                // 2. Finalize
+                // 4. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No data records found in file.");
+                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -83,7 +89,7 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
+                statusBox.innerHTML = `✅ Success! Adjusted ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
