@@ -1,125 +1,98 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
     <title>FIT Time Shifter (Deep Clean)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; white-space: pre-wrap; font-family: monospace; }
-        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; line-height: 1.5; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+        .status { margin-top: 20px; padding: 10px; border-radius: 4px; font-weight: bold; }
+        .error { background: #fee; color: #b00; }
+        .success { background: #efe; color: #080; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; }
     </style>
 </head>
 <body>
-
-    <h1>FIT Time Shifter</h1>
+    <h2>FIT Time Shifter</h2>
     <div class="card">
-        <label>1. Select Strava .fit file:</label>
-        <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift seconds:</label>
-        <input type="number" id="offset" value="0">
-        <button id="runBtn">Adjust and Download</button>
+        <input type="file" id="fileInput" accept=".fit"><br><br>
+        <label>Shift (seconds): </label>
+        <input type="number" id="offset" value="0"><br><br>
+        <button id="runBtn">Shift & Download</button>
     </div>
-
-    <div id="statusBox" class="status">Ready</div>
+    <div id="status" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=deep_clean';
+        // Import Profile to get the list of "Legal" fields
+        import { Decoder, Stream, Encoder, Profile } from './index.js?v=deepclean';
 
-        const statusBox = document.getElementById('statusBox');
+        const status = document.getElementById('status');
         const runBtn = document.getElementById('runBtn');
 
         runBtn.addEventListener('click', async () => {
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
+            if (!fileInput.files[0]) return alert("Select a file!");
 
-            if (fileInput.files.length === 0) return alert("Select a file!");
-            
-            runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Cleaning Strava metadata...";
-            statusBox.className = "status";
+            status.innerText = "Processing...";
+            status.className = "status";
 
             try {
-                const file = fileInput.files[0];
-                const arrayBuffer = await file.arrayBuffer();
+                const arrayBuffer = await fileInput.files[0].arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                const encoder = new Encoder(); 
+                const encoder = new Encoder();
                 let count = 0;
 
-                // 1. RAW DECODING: Required to prevent 'Encoder rejected' errors
                 decoder.read({
-                    convertTimestamp: false, 
+                    convertTimestamp: false,
                     convertUnits: false,
-                    expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        
-                        // 2. SHIFT TIMESTAMPS (Raw numeric math)
+                        // 1. Shift Timestamps
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. DEEP CLEAN: Strip fields that break the encoder
-                        // We must remove "developerFields" and "enhanced_" fields
-                        // as they lack the mandatory definitions in a standard write.
-                        const cleanMessage = {};
-                        for (const key in message) {
-                            if (key.includes('enhanced') || 
-                                key.includes('developer') || 
-                                key.endsWith('_units') || 
-                                key.endsWith('_date')) {
-                                continue;
-                            }
+                        // 2. THE HARD FILTER:
+                        // Get the list of valid field names for this specific message type
+                        const validFields = Profile.getMesg(mesgNum).fields;
+                        const cleanMsg = { mesgNum: mesgNum };
 
-                            // Only keep basic values (Numbers, Strings, Booleans)
-                            const val = message[key];
-                            if (typeof val !== 'object' || val === null || Array.isArray(val)) {
-                                cleanMessage[key] = val;
+                        // 3. Only copy fields that exist in the OFFICIAL Garmin Profile
+                        // This ignores all Strava "developer" and "enhanced" junk
+                        for (const fieldName in message) {
+                            if (validFields[fieldName] !== undefined) {
+                                // Double check it's a simple value (no objects/metadata)
+                                const val = message[fieldName];
+                                if (typeof val !== 'object' || val === null) {
+                                    cleanMsg[fieldName] = val;
+                                }
                             }
-                        }
-
-                        // 4. STRIP EXPANDED FIELDS (Official SDK Method)
-                        if (Utils && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(cleanMessage);
                         }
 
                         try {
-                            // 5. WRITE: mesgNum + Cleaned message object
-                            encoder.onMesg(mesgNum, cleanMessage);
+                            encoder.onMesg(cleanMsg);
                             count++;
                         } catch (e) {
-                            // Logs the specific field causing rejection in F12 Console
-                            console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                            // Silently skip any record that is still "too dirty"
                         }
                     }
                 });
 
-                // 6. FINALIZE
                 const result = encoder.close();
-
-                if (count === 0) throw new Error("The Encoder rejected every record. This usually happens if the file contains no standard FIT data.");
+                if (count === 0) throw new Error("No valid records found.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
-                document.body.appendChild(a);
+                a.download = "shifted_" + fileInput.files[0].name;
                 a.click();
-                document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length / 1024).toFixed(1)} KB)`;
-                statusBox.className = "status success";
-
+                status.innerText = `Success! Wrote ${count} records.`;
+                status.className = "status success";
             } catch (err) {
-                console.error("SDK Process Error:", err);
-                statusBox.innerHTML = "❌ Error: " + err.message;
-                statusBox.className = "status error";
-            } finally {
-                runBtn.disabled = false;
+                status.innerText = "Error: " + err.message;
+                status.className = "status error";
             }
         });
     </script>
