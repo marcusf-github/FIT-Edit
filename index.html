@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Record-Safe)</title>
+    <title>FIT Time Shifter (Manual Loop)</title>
     <style>
         body { font-family: sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f4f7f6; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -27,7 +27,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=record-safe';
+        import { Decoder, Stream, Encoder, Profile } from './index.js?v=manual';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -38,50 +38,53 @@
 
             if (fileInput.files.length === 0) return alert("Select a file!");
 
-            statusBox.innerHTML = "⏳ Processing records...";
+            statusBox.innerHTML = "⏳ Decoding file...";
             statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0]; // Targeted first file in list
+                const file = fileInput.files[0]; 
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
+                
+                // 1. Read EVERYTHING at once into an object
+                const { messages } = decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    expandComponents: false
+                });
+
                 const encoder = new Encoder();
                 let count = 0;
 
-                // Use the standard read() but with a listener
-                decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false,
-                    mesgListener: (mesgNum, message) => {
-                        // 1. Shift timestamps
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                // 2. Manually loop through the messages object
+                for (const mesgName in messages) {
+                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
+                    if (mesgNum === undefined) continue;
 
-                        // 2. Clone the object and inject the mesgNum
-                        // This strips hidden SDK metadata that causes encoding failures
-                        const cleanMsg = JSON.parse(JSON.stringify(message));
-                        cleanMsg.mesgNum = mesgNum;
+                    messages[mesgName].forEach(msg => {
+                        // Apply time shift
+                        if (msg.timestamp !== undefined) msg.timestamp += offset;
+                        if (msg.startTime !== undefined) msg.startTime += offset;
+                        if (msg.startDate !== undefined) msg.startDate += offset;
+
+                        // Inject the mesgNum for the encoder
+                        msg.mesgNum = mesgNum;
 
                         try {
-                            // Using the direct write method
-                            encoder.writeMesg(cleanMsg);
+                            encoder.writeMesg(msg);
                             count++;
                         } catch (e) {
-                            console.warn("Write failed for record", mesgNum, e.message);
+                            console.warn("Skipped record:", e.message);
                         }
-                    }
-                });
+                    });
+                }
 
                 const result = encoder.close();
 
-                if (result.length < 200) {
-                    throw new Error(`Only ${result.length} bytes written. Is this a valid FIT file?`);
-                }
+                if (count === 0) throw new Error("Decoder found no messages. Check file format.");
 
-                // Download
+                // 3. Trigger Download
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
