@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter v21.195.00</title>
+    <title>FIT Time Shifter (Deep Clean)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 550px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:disabled { background: #ccc; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -21,13 +22,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Adjust and Download</button>
+        <button id="runBtn">Clean & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=final';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_clean';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,7 +40,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             
             runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Scanning file records...";
+            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
             statusBox.className = "status";
 
             try {
@@ -47,39 +48,48 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                const encoder = new Encoder();
+                const encoder = new Encoder(); 
                 let count = 0;
 
-                // FIX: Latest SDK uses an ASYNC ITERATOR.
-                // We must use 'for await' to extract messages one by one.
-                for await (const { mesgNum, message } of decoder.read({
+                // Use the modern read() with listener
+                decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
-                    expandComponents: false
-                })) {
-                    
-                    // 1. Shift Timestamps
-                    if (message.timestamp !== undefined) message.timestamp += offset;
-                    if (message.startTime !== undefined) message.startTime += offset;
-                    if (message.startDate !== undefined) message.startDate += offset;
+                    expandComponents: false,
+                    mesgListener: (mesgNum, message) => {
+                        
+                        // 1. Shift timestamps (raw integers)
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    // 2. Clean the record (Removes virtual fields that break Encoder)
-                    if (Utils && Utils.removeExpandedFields) {
-                        Utils.removeExpandedFields(message);
+                        // 2. CRITICAL CLEAN: Strip expanded/computed fields
+                        if (Utils && Utils.removeExpandedFields) {
+                            Utils.removeExpandedFields(message);
+                        }
+
+                        // 3. MANUAL FILTER: Delete any virtual fields that cause rejection
+                        for (const key in message) {
+                            if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
+                                delete message[key];
+                            }
+                        }
+
+                        try {
+                            // 4. Write: onMesg(mesgNum, data)
+                            encoder.onMesg(mesgNum, message);
+                            count++;
+                        } catch (e) {
+                            // Log the exact field causing rejection
+                            console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
+                        }
                     }
-
-                    // 3. Write to Encoder
-                    try {
-                        encoder.onMesg(mesgNum, message);
-                        count++;
-                    } catch (e) {
-                        console.warn(`Skipped record ${mesgNum}:`, e.message);
-                    }
-                }
-
-                if (count === 0) throw new Error("No data records were found in the file.");
+                });
 
                 const result = encoder.close();
+
+                if (count === 0) throw new Error("Encoder rejected all records. Check Console (F12) for 'cause'.");
+
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -94,7 +104,9 @@
 
             } catch (err) {
                 console.error("SDK Process Error:", err);
-                statusBox.innerHTML = "❌ Error: " + err.message;
+                // Display the "Cause" if available to diagnose specific field errors
+                let causeInfo = err.cause ? `\nCause: ${JSON.stringify(err.cause, null, 2)}` : "";
+                statusBox.innerHTML = `❌ Error: ${err.message}${causeInfo}`;
                 statusBox.className = "status error";
             } finally {
                 runBtn.disabled = false;
