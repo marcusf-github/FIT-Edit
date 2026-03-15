@@ -2,107 +2,86 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FIT Time Shifter (Deep Scan)</title>
+    <title>FIT Time Shifter (Final Compatibility)</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 2rem; line-height: 1.5; max-width: 600px; margin: 0 auto; background: #f4f7f6; }
+        body { font-family: sans-serif; padding: 2rem; line-height: 1.5; max-width: 600px; margin: 0 auto; background: #f4f7f6; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 0.9rem; text-align: center; }
-        .error { background: #fff0f0; color: #d00; border: 1px solid #fcc; }
-        .success { background: #f0fff4; color: #2d6a4f; border: 1px solid #b7e4c7; }
-        .info { background: #eef6ff; color: #004085; border: 1px solid #b8daff; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 1rem; }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        label { font-weight: bold; display: block; margin-bottom: 5px; }
     </style>
 </head>
 <body>
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label for="fileInput">1. Select .fit file:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-
-        <label for="offset">2. Shift time (seconds):</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <p style="font-size: 0.8rem; color: #666; margin-top: -10px;">(e.g., 3600 = +1 hour, -60 = -1 minute)</p>
-        
         <button id="runBtn">Process & Download</button>
     </div>
 
-    <div id="statusBox" class="status info">Waiting for file...</div>
+    <div id="statusBox" class="status">Waiting...</div>
 
     <script type="module">
-        // Using a cache buster (?v=DeepScan) to ensure GitHub refreshes the script
-        import { Decoder, Stream, Encoder } from './index.js?v=DeepScan';
+        import { Decoder, Stream, Encoder } from './index.js?v=final';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
-
-        // Check if SDK loaded
-        if (typeof Decoder !== 'undefined') {
-            statusBox.innerHTML = "✅ SDK Ready";
-            statusBox.className = "status success";
-        } else {
-            statusBox.innerHTML = "❌ SDK Error: index.js or /src folder not found.";
-            statusBox.className = "status error";
-        }
 
         runBtn.addEventListener('click', async () => {
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
-            if (fileInput.files.length === 0) return alert("Select a file first.");
+            if (fileInput.files.length === 0) return alert("Select a file!");
 
-            runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Scanning file...";
-            statusBox.className = "status info";
+            statusBox.innerHTML = "⏳ Processing...";
+            statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0];
+                const file = fileInput.files[0]; // Targeted first file specifically
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const encoder = new Encoder();
                 let totalCount = 0;
 
-                // --- DEEP SCAN LOOP ---
-                // This ensures we read past the first message/header and get all activity data
+                // Loop through the entire stream to find all messages
                 while (stream.position < stream.length) {
                     const decoder = new Decoder(stream);
                     
                     decoder.read({
                         mesgListener: (mesgNum, message) => {
-                            // Apply time shift to raw numeric timestamps
+                            // Apply time shift to raw numeric fields
                             if (message.timestamp !== undefined) message.timestamp += offset;
                             if (message.startTime !== undefined) message.startTime += offset;
                             if (message.startDate !== undefined) message.startDate += offset;
 
-                            // Pipe directly to encoder
-                            encoder.onMesg(mesgNum, message);
-                            totalCount++;
+                            // REPAIR: Modern Garmin SDK onMesg expects the mesgNum inside the object
+                            message.mesgNum = mesgNum;
+                            
+                            try {
+                                encoder.onMesg(message); // Pass as a single object
+                                totalCount++;
+                            } catch (e) {
+                                // Fallback for different SDK versions
+                                encoder.onMesg(mesgNum, message);
+                                totalCount++;
+                            }
                         }
                     });
                 }
 
-                console.log("Total records processed:", totalCount);
-
-                if (totalCount === 0) {
-                    throw new Error("No data found. Is this a valid FIT file?");
-                }
-
-                // Finalize the binary file
                 const result = encoder.close();
-                
-                // Final safety check on file size
-                if (result.length < 100) {
-                    throw new Error("Encoder failed to write data records (File too small).");
+
+                if (result.length < 200) {
+                    throw new Error(`Encoder only wrote ${result.length} bytes. Check if the SDK folder structure is correct.`);
                 }
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
-                
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `shifted_${file.name}`;
@@ -110,15 +89,13 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${totalCount} records. (${(result.length / 1024).toFixed(1)} KB)`;
+                statusBox.innerHTML = `✅ Success! Wrote ${totalCount} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("Processing Error:", err);
+                console.error("SDK Error:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
-            } finally {
-                runBtn.disabled = false;
             }
         });
     </script>
