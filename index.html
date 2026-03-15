@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Final Fix)</title>
+    <title>FIT Time Shifter (Async Fix)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Adjust and Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting for file...</div>
+    <div id="statusBox" class="status">Waiting...</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile } from './index.js?v=final';
+        import { Decoder, Stream, Encoder } from './index.js?v=async_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,55 +39,38 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Decoding file...";
+            statusBox.innerHTML = "⏳ Processing (Async Mode)...";
             statusBox.className = "status";
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // 1. Decode EVERYTHING at once
-                const { messages, errors } = decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false
-                });
-
-                if (errors.length > 0) console.warn("Decoder errors:", errors);
-
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 2. Loop through the decoded messages dictionary
-                // Keys are names like 'recordMesgs', 'lapMesgs', etc.
-                for (const key in messages) {
-                    // Map name to numeric MesgNum (e.g., 'recordMesgs' -> 20)
-                    const baseName = key.replace('Mesgs', '').toUpperCase();
-                    const mesgNum = Profile.MesgNum[baseName];
+                // THE FIX: In the new SDK, decoder.read() triggers listeners 
+                // but you must ensure the stream is read fully.
+                decoder.read({
+                    convertTimestamp: false, 
+                    convertUnits: false,
+                    mesgListener: (mesgNum, message) => {
+                        // Apply shift
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                    if (mesgNum !== undefined) {
-                        messages[key].forEach(msg => {
-                            // Apply time shift
-                            if (msg.timestamp !== undefined) msg.timestamp += offset;
-                            if (msg.startTime !== undefined) msg.startTime += offset;
-                            if (msg.startDate !== undefined) msg.startDate += offset;
-
-                            // Write to encoder
-                            try {
-                                encoder.onMesg(mesgNum, msg);
-                                count++;
-                            } catch (e) {
-                                console.warn(`Skipped ${key} message:`, e.message);
-                            }
-                        });
+                        // Pipe to encoder
+                        encoder.onMesg(mesgNum, message);
+                        count++;
                     }
-                }
+                });
 
-                if (count === 0) throw new Error("No valid messages found to encode.");
-
-                // 3. Finalize and Download
+                // Finalize
                 const result = encoder.close();
+
+                if (count === 0) throw new Error("No data records were captured by the listener.");
+
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
