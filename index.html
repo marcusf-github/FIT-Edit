@@ -2,16 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Final Fix)</title>
+    <title>FIT Time Shifter</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5; max-width: 700px; margin: 0 auto; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 0.9rem; }
-        .error { background: #fff0f0; color: #d00; border: 1px solid #fcc; }
-        .success { background: #f0fff4; color: #2d6a4f; border: 1px solid #b7e4c7; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        body { font-family: sans-serif; padding: 20px; line-height: 1.5; max-width: 600px; margin: auto; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 10px; background: #fafafa; }
+        .status { margin-top: 15px; padding: 10px; border-radius: 5px; font-weight: bold; }
+        .error { background: #fee; color: #c00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #070; border: 1px solid #cfc; }
+        button { width: 100%; padding: 12px; background: #007bff; color: #fff; border: none; cursor: pointer; border-radius: 5px; }
+        input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
     </style>
 </head>
 <body>
@@ -20,27 +19,27 @@
     <div class="card">
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-
-        <label>2. Shift time (seconds):</label>
+        <label>2. Shift seconds (e.g., 3600 for +1hr):</label>
         <input type="number" id="offset" value="0">
-        
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Shift & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Initializing SDK...</div>
+    <div id="statusBox" class="status">Testing SDK Connection...</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=final';
+        // Using a relative path and adding a 'cache buster' (?v=...) 
+        // to force GitHub to load the newest version.
+        import { Decoder, Stream, Encoder } from './index.js?v=99';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
 
-        // Verify SDK files are reachable
-        if (Decoder && Encoder) {
-            statusBox.innerHTML = "✅ SDK Ready";
+        // Check if the basics loaded
+        if (typeof Decoder !== 'undefined') {
+            statusBox.innerHTML = "✅ SDK Connected Successfully";
             statusBox.className = "status success";
         } else {
-            statusBox.innerHTML = "❌ SDK Error: Files missing in /src folder";
+            statusBox.innerHTML = "❌ SDK 404: Check if 'index.js' and the 'src' folder are in your GitHub repo.";
             statusBox.className = "status error";
         }
 
@@ -50,8 +49,7 @@
 
             if (fileInput.files.length === 0) return alert("Select a file first.");
 
-            runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Processing... (Check Console F12 for details)";
+            statusBox.innerHTML = "⏳ Processing...";
             statusBox.className = "status";
 
             try {
@@ -63,51 +61,46 @@
 
                 let count = 0;
 
-                // CRITICAL: We use 'mesgListener' to intercept messages as they are decoded
-                // This ensures we get RAW numeric data that the encoder can immediately accept
+                // We use the raw 'read' with a listener to ensure we catch every message
+                // as it's decoded, before it gets transformed into human-readable text.
                 decoder.read({
                     mesgListener: (mesgNum, message) => {
-                        // 1. Shift timestamps in the raw message object
+                        // Apply shift to common time fields
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. Direct write to encoder
-                        // Use onMesg(mesgNum, message) for maximum compatibility
+                        // Write directly to the new file
                         encoder.onMesg(mesgNum, message);
                         count++;
                     }
                 });
 
-                console.log(`Processed ${count} messages.`);
+                console.log("Total records processed:", count);
 
-                if (count === 0) throw new Error("No data found in file.");
+                if (count === 0) {
+                    throw new Error("Decoder found 0 records. Is this a valid .fit file?");
+                }
 
-                // 3. Close & Finalize
+                // Finalize the file
                 const result = encoder.close();
-                
-                // If result is small (< 100 bytes), something went wrong with the write
-                if (result.length < 100) throw new Error("Encoder failed to write data records.");
-
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
+                a.download = "shifted_" + file.name;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Done! Wrote ${count} records. File size: ${(result.length/1024).toFixed(1)} KB`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Error:", err);
+                console.error(err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
-            } finally {
-                runBtn.disabled = false;
             }
         });
     </script>
