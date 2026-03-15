@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Final)</title>
+    <title>FIT Time Shifter (Final Check)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift & Download</button>
+        <button id="runBtn">Verify & Process</button>
     </div>
 
-    <div id="statusBox" class="status">Ready</div>
+    <div id="statusBox" class="status">Waiting...</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=final_fix';
+        import { Decoder, Stream, Encoder } from './index.js?v=verification';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -37,47 +37,51 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
+            const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Processing...";
+            statusBox.innerHTML = "⏳ Reading file...";
             statusBox.className = "status";
 
             try {
-                const file = fileInput.files[0]; 
-                const arrayBuffer = await file.arrayBuffer();
+                // Use a standard Promise-based FileReader for better browser compatibility
+                const arrayBuffer = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
-                const decoder = new Decoder(stream);
+                
+                // VERIFICATION: Check if it's actually a FIT file
+                if (!Decoder.isFIT(stream)) {
+                    throw new Error("This file does not have a valid FIT header.");
+                }
+
                 const encoder = new Encoder();
                 let count = 0;
 
-                // We use the raw 'read' with a listener. 
-                // This captures messages AS they are decoded.
+                // Single pass read with listener is more stable for large activity files
+                const decoder = new Decoder(stream);
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // 1. Shift the numeric timestamps
+                        // Apply shift
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. PIPE TO ENCODER
-                        // In the official SDK, onMesg(num, data) automatically 
-                        // creates the required Definition Message.
-                        try {
-                            encoder.onMesg(mesgNum, message);
-                            count++;
-                        } catch (e) {
-                            console.warn("Skipped record:", mesgNum, e.message);
-                        }
+                        // Pipe to encoder
+                        encoder.onMesg(mesgNum, message);
+                        count++;
                     }
                 });
 
-                // 3. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No records found in file.");
-                if (result.length < 200) throw new Error(`Only ${result.length} bytes written. Header only.`);
+                if (count === 0) throw new Error("Verification passed, but no data records found.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
