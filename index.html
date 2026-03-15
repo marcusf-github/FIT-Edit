@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Strip & Sync)</title>
+    <title>FIT Time Shifter (Stable)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,14 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Shift & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import Utils - it's the key to fixing the rejection error
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=strip_fix';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=stable';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -38,9 +37,9 @@
             const offset = parseInt(document.getElementById('offset').value) || 0;
 
             if (fileInput.files.length === 0) return alert("Select a file!");
-            const file = fileInput.files[0];
+            const file = fileInput.files[0]; // Targeted first file
 
-            statusBox.innerHTML = "⏳ Stripping and shifting data...";
+            statusBox.innerHTML = "⏳ Shifting timestamps...";
             statusBox.className = "status";
 
             try {
@@ -50,35 +49,36 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // Use the standard listener-based read
+                // CLASSIC METHOD: Passes a listener object to the read function
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // 1. Shift the numeric timestamps
+                        // Apply time shift
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 2. THE CRITICAL FIX: Strip non-binary fields
-                        // This removes "helper" data that causes Encoder to reject the record.
-                        Utils.removeExpandedFields(message);
+                        // CRITICAL: Clean the data so the encoder accepts it
+                        if (typeof Utils !== 'undefined' && Utils.removeExpandedFields) {
+                            Utils.removeExpandedFields(message);
+                        }
 
                         try {
-                            // 3. Official write method: mesgNum + data object
+                            // Link mesgNum to data
                             encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn(`Encoder rejected record ${mesgNum}:`, e.message);
+                            console.warn("Skipped record:", mesgNum);
                         }
                     }
                 });
 
-                // 4. Finalize
+                // Finalize the binary file
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all messages. Check console (F12).");
+                if (count === 0) throw new Error("No records were written. The decoder didn't find any data.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -89,7 +89,7 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Adjusted ${count} records.`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
