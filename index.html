@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Clean Mode)</title>
+    <title>FIT Time Shifter (Deep Scan)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,14 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift & Download</button>
+        <button id="runBtn">Scan & Shift</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import Utils as well - it's the key to fixing the encoding error
-        import { Decoder, Stream, Encoder, Utils } from './index.js?v=clean_fix';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=deep_scan';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -40,45 +39,49 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
+            statusBox.innerHTML = "⏳ Scanning all data records...";
             statusBox.className = "status";
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
-                const decoder = new Decoder(stream);
                 const encoder = new Encoder();
-                let count = 0;
+                let totalCount = 0;
 
-                // 1. Read with strict raw settings
-                decoder.read({
-                    convertTimestamp: false, 
-                    convertUnits: false,
-                    expandComponents: false,
-                    mesgListener: (mesgNum, message) => {
-                        // 2. SHIFT TIMESTAMPS
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
+                // FIX: Loop through the entire stream. 
+                // This ensures we find messages even after the first 'file_id' block.
+                while (stream.position < stream.length) {
+                    const decoder = new Decoder(stream);
+                    
+                    decoder.read({
+                        convertTimestamp: false, 
+                        convertUnits: false,
+                        expandComponents: false,
+                        mesgListener: (mesgNum, message) => {
+                            // Apply shift
+                            if (message.timestamp !== undefined) message.timestamp += offset;
+                            if (message.startTime !== undefined) message.startTime += offset;
+                            if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. THE CRITICAL FIX: Strip non-binary fields
-                        // This removes things like "distance_units" or "speed_kmh" 
-                        // which cause the Encoder to fail.
-                        Utils.removeExpandedFields(message);
+                            // Clean data for the encoder
+                            Utils.removeExpandedFields(message);
 
-                        try {
-                            encoder.onMesg(mesgNum, message);
-                            count++;
-                        } catch (e) {
-                            console.warn("Encoder rejected a record:", e.message);
+                            try {
+                                encoder.onMesg(mesgNum, message);
+                                totalCount++;
+                            } catch (e) {
+                                console.warn("Encoder rejected record:", mesgNum);
+                            }
                         }
-                    }
-                });
+                    });
+                    
+                    // Safety break: if the decoder isn't advancing, stop to avoid infinite loop
+                    if (stream.position === 0 && stream.length > 0) break;
+                }
 
-                // 4. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No valid records were written. Check browser console (F12).");
+                if (totalCount < 5) throw new Error(`Only ${totalCount} records found. Check if this is a valid activity file.`);
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -89,7 +92,7 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
+                statusBox.innerHTML = `✅ Success! Wrote ${totalCount} records.`;
                 statusBox.className = "status success";
 
             } catch (err) {
