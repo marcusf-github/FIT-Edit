@@ -2,15 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (v21.195.00 Final)</title>
+    <title>FIT Time Shifter (Strava-Safe)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
-        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; white-space: pre-wrap; font-family: monospace; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f4f7f6; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; text-align: left; font-size: 0.8rem; white-space: pre-wrap; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
     </style>
 </head>
@@ -18,17 +17,17 @@
 
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select .fit file:</label>
+        <label>1. Select Strava .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift time (seconds):</label>
+        <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Shift and Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.00';
+        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=strava_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,8 +38,7 @@
 
             if (fileInput.files.length === 0) return alert("Select a file!");
             
-            runBtn.disabled = true;
-            statusBox.innerHTML = "⏳ Decoding and sanitizing records...";
+            statusBox.innerHTML = "⏳ Stripping Strava metadata...";
             statusBox.className = "status";
 
             try {
@@ -48,68 +46,68 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
-                
-                // 1. Decode EVERYTHING at once with raw settings
+                const encoder = new Encoder();
+                let count = 0;
+
+                // 1. Force RAW decoding (No Dates, No Units)
                 const { messages } = decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
                     expandComponents: false
                 });
 
-                const encoder = new Encoder();
-                let count = 0;
-
-                // 2. Iterate through message types (record, lap, session, etc.)
+                // 2. Loop through all message types
                 for (const mesgName in messages) {
                     const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
                     if (mesgNum === undefined) continue;
 
                     messages[mesgName].forEach(msg => {
-                        // Apply time shift to raw FIT Epoch integers
+                        // 3. Shift the raw FIT Epoch integers
                         if (msg.timestamp !== undefined) msg.timestamp += offset;
                         if (msg.startTime !== undefined) msg.startTime += offset;
                         if (msg.startDate !== undefined) msg.startDate += offset;
 
-                        // 3. STRICT RECONSTRUCTION:
-                        // We build a new message containing ONLY primitive values.
-                        // This bypasses the 'Encoder rejected' issues caused by SDK metadata.
+                        // 4. THE FIX: Create a CLEAN Whitelist Object
                         const cleanMsg = {};
                         for (const key in msg) {
-                            // Skip 'enhanced' duplicates and virtual unit fields
-                            if (key.startsWith('enhanced_') || key.endsWith('_units') || key.endsWith('_date')) {
+                            // SKIP fields that cause Encoder Rejection:
+                            // - Enhanced fields (Strava adds these)
+                            // - Developer data (Strava's 'Relative Effort', etc)
+                            // - Virtual units/dates
+                            if (key.includes('enhanced') || 
+                                key.includes('developer') || 
+                                key.endsWith('_units') || 
+                                key.endsWith('_date')) {
                                 continue;
                             }
-                            
+
+                            // ONLY accept raw numbers, strings, or booleans
                             const val = msg[key];
-                            // Only include Numbers, Strings, and Booleans (binary-ready types)
-                            if (typeof val !== 'object' || val === null || Array.isArray(val)) {
+                            if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
                                 cleanMsg[key] = val;
                             }
                         }
 
-                        // Remove standard expanded fields just in case
+                        // Final safety strip
                         if (Utils && Utils.removeExpandedFields) {
                             Utils.removeExpandedFields(cleanMsg);
                         }
 
                         try {
-                            // 4. Official write method
                             encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            console.warn(`Skipped ${mesgName} record:`, e.message, e.cause);
+                            // Log specifically which message failed
+                            console.warn(`Skipped ${mesgName} record:`, e.message);
                         }
                     });
                 }
 
-                // 5. Finalize and check size
+                // 5. Finalize
                 const result = encoder.close();
 
-                if (count === 0) {
-                    throw new Error("The Encoder rejected every record. Check Console (F12) for detailed causes.");
-                }
+                if (count === 0) throw new Error("Encoder rejected all records. Try a different file.");
 
-                // Download
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -119,15 +117,13 @@
                 a.click();
                 document.body.removeChild(a);
 
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length / 1024).toFixed(1)} KB)`;
+                statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length/1024).toFixed(1)} KB)`;
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error("SDK Error:", err);
-                statusBox.innerHTML = `❌ Error: ${err.message}`;
+                console.error(err);
+                statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
-            } finally {
-                runBtn.disabled = false;
             }
         });
     </script>
