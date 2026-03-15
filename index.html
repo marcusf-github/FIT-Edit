@@ -27,82 +27,72 @@
     <div id="statusBox" class="status">Testing SDK Connection...</div>
 
     <script type="module">
-        // Using a relative path and adding a 'cache buster' (?v=...) 
-        // to force GitHub to load the newest version.
-        import { Decoder, Stream, Encoder } from './index.js?v=99';
+    import { Decoder, Stream, Encoder } from './index.js?v=final_fix';
 
-        const statusBox = document.getElementById('statusBox');
-        const runBtn = document.getElementById('runBtn');
+    const statusBox = document.getElementById('statusBox');
+    const runBtn = document.getElementById('runBtn');
 
-        // Check if the basics loaded
-        if (typeof Decoder !== 'undefined') {
-            statusBox.innerHTML = "✅ SDK Connected Successfully";
+    runBtn.addEventListener('click', async () => {
+        const fileInput = document.getElementById('fileInput');
+        const offset = parseInt(document.getElementById('offset').value) || 0;
+
+        if (fileInput.files.length === 0) return alert("Select a file first.");
+
+        statusBox.innerHTML = "⏳ Processing...";
+        statusBox.className = "status";
+
+        try {
+            const file = fileInput.files[0]; // Ensure we get the single file
+            const arrayBuffer = await file.arrayBuffer();
+            const stream = Stream.fromArrayBuffer(arrayBuffer);
+            const decoder = new Decoder(stream);
+            const encoder = new Encoder();
+
+            let count = 0;
+
+            // Use the BROADCAST listener - this is the most reliable way 
+            // to pipe data from Decoder to Encoder in the JS SDK.
+            decoder.read({
+                mesgListener: (mesgNum, message) => {
+                    // 1. Shift the timestamps
+                    if (message.timestamp !== undefined) message.timestamp += offset;
+                    if (message.startTime !== undefined) message.startTime += offset;
+                    if (message.startDate !== undefined) message.startDate += offset;
+
+                    // 2. IMPORTANT: Use onMesg with the ID. 
+                    // This automatically handles Definition Messages.
+                    encoder.onMesg(mesgNum, message);
+                    count++;
+                }
+            });
+
+            // 3. Finalize
+            const result = encoder.close();
+
+            if (result.length < 100) {
+                throw new Error(`File too small (${result.length} bytes). Encoder failed.`);
+            }
+
+            const blob = new Blob([result], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "shifted_" + file.name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            statusBox.innerHTML = `✅ Success! Wrote ${count} records. (${(result.length/1024).toFixed(1)} KB)`;
             statusBox.className = "status success";
-        } else {
-            statusBox.innerHTML = "❌ SDK 404: Check if 'index.js' and the 'src' folder are in your GitHub repo.";
+
+        } catch (err) {
+            console.error(err);
+            statusBox.innerHTML = "❌ Error: " + err.message;
             statusBox.className = "status error";
         }
+    });
+</script>
 
-        runBtn.addEventListener('click', async () => {
-            const fileInput = document.getElementById('fileInput');
-            const offset = parseInt(document.getElementById('offset').value) || 0;
-
-            if (fileInput.files.length === 0) return alert("Select a file first.");
-
-            statusBox.innerHTML = "⏳ Processing...";
-            statusBox.className = "status";
-
-            try {
-                const file = fileInput.files[0];
-                const arrayBuffer = await file.arrayBuffer();
-                const stream = Stream.fromArrayBuffer(arrayBuffer);
-                const decoder = new Decoder(stream);
-                const encoder = new Encoder();
-
-                let count = 0;
-
-                // We use the raw 'read' with a listener to ensure we catch every message
-                // as it's decoded, before it gets transformed into human-readable text.
-                decoder.read({
-                    mesgListener: (mesgNum, message) => {
-                        // Apply shift to common time fields
-                        if (message.timestamp !== undefined) message.timestamp += offset;
-                        if (message.startTime !== undefined) message.startTime += offset;
-                        if (message.startDate !== undefined) message.startDate += offset;
-
-                        // Write directly to the new file
-                        encoder.onMesg(mesgNum, message);
-                        count++;
-                    }
-                });
-
-                console.log("Total records processed:", count);
-
-                if (count === 0) {
-                    throw new Error("Decoder found 0 records. Is this a valid .fit file?");
-                }
-
-                // Finalize the file
-                const result = encoder.close();
-                const blob = new Blob([result], { type: "application/octet-stream" });
-                const url = URL.createObjectURL(blob);
-                
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = "shifted_" + file.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-
-                statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
-                statusBox.className = "status success";
-
-            } catch (err) {
-                console.error(err);
-                statusBox.innerHTML = "❌ Error: " + err.message;
-                statusBox.className = "status error";
-            }
-        });
-    </script>
 </body>
 </html>
