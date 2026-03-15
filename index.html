@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Strava-Safe)</title>
+    <title>FIT Time Shifter (Broadcast Mode)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -21,13 +21,13 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Shift and Download</button>
+        <button id="runBtn">Process & Download</button>
     </div>
 
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=strava_final';
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=broadcast_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,7 +39,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Stripping Strava metadata...";
+            statusBox.innerHTML = "⏳ Piping data through encoder...";
             statusBox.className = "status";
 
             try {
@@ -49,70 +49,51 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 1. Force RAW decoding (No Dates, No Units)
-                const { messages } = decoder.read({
+                // THE FIX: Use the 'mesgListener'. 
+                // This intercepts messages AS they are decoded and pipes them to the encoder.
+                decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
-                    expandComponents: false
-                });
+                    expandComponents: false,
+                    mesgListener: (mesgNum, message) => {
+                        // 1. Shift timestamps in the raw data
+                        if (message.timestamp !== undefined) message.timestamp += offset;
+                        if (message.startTime !== undefined) message.startTime += offset;
+                        if (message.startDate !== undefined) message.startDate += offset;
 
-                // 2. Loop through all message types
-                for (const mesgName in messages) {
-                    const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
-                    if (mesgNum === undefined) continue;
-
-                    messages[mesgName].forEach(msg => {
-                        // 3. Shift the raw FIT Epoch integers
-                        if (msg.timestamp !== undefined) msg.timestamp += offset;
-                        if (msg.startTime !== undefined) msg.startTime += offset;
-                        if (msg.startDate !== undefined) msg.startDate += offset;
-
-                        // 4. THE FIX: Create a CLEAN Whitelist Object
-                        // We ONLY copy standard numbers/strings. 
-                        // This ignores the "helper objects" and Strava's custom fields.
-                        const cleanMsg = {};
-                        for (const key in msg) {
-                            const val = msg[key];
-                            
-                            // SKIP fields that cause Encoder Rejection:
-                            if (key.includes('enhanced') || 
-                                key.includes('developer') || 
-                                key.includes('unknown') ||
-                                key.endsWith('_units') || 
-                                key.endsWith('_date')) {
-                                continue;
-                            }
-
-                            // ONLY accept raw numbers, strings, or booleans
-                            if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
-                                cleanMsg[key] = val;
-                            }
+                        // 2. STRIP problematic Strava metadata
+                        // We must remove expanded fields or the encoder will reject the record
+                        if (Utils && Utils.removeExpandedFields) {
+                            Utils.removeExpandedFields(message);
                         }
 
-                        // Final safety strip
-                        if (Utils && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(cleanMsg);
+                        // 3. Remove Developer/Enhanced fields manually
+                        for (const key in message) {
+                            if (key.includes('enhanced') || key.includes('developer') || key.includes('unknown')) {
+                                delete message[key];
+                            }
                         }
 
                         try {
-                            // 5. Official write method: onMesg(mesgNum, data)
-                            encoder.onMesg(mesgNum, cleanMsg);
+                            // 4. onMesg(num, data) automatically creates the required binary definitions
+                            encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            console.warn(`Skipped ${mesgName}: ${e.message}`);
+                            console.warn(`Skipped mesg ${mesgNum}: ${e.message}`);
                         }
-                    });
-                }
+                    }
+                });
 
+                // 5. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("The Encoder rejected every record. Check Console (F12).");
+                if (count === 0) throw new Error("Zero records were written. The encoder rejected all data.");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `shifted_${file.name}`;
+                a.download = "shifted_" + file.name;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
