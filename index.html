@@ -28,8 +28,8 @@
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        // Import all required components from the SDK
-        import { Decoder, Stream, Encoder, Utils, ProtocolVersion } from './index.js?v=final';
+        // Removed 'ProtocolVersion' from the import to fix SyntaxError
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=21.195.00';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -50,27 +50,28 @@
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 
-                // Use Protocol V2.0 to handle modern Garmin data/developer fields
-                const encoder = new Encoder(ProtocolVersion.V20);
+                // Initialize Encoder without a specific protocol version
+                const encoder = new Encoder();
                 let count = 0;
 
-                // 1. RAW DECODING: Essential to prevent 'Encoder rejected' errors
+                // 1. RAW DECODING: Required to prevent 'Encoder rejected' errors
                 decoder.read({
-                    convertTimestamp: false, // Keep as raw FIT seconds (integers)
-                    convertUnits: false,     // Keep as raw binary values
+                    convertTimestamp: false, // Keep as raw FIT seconds
+                    convertUnits: false,     // Keep as raw values
                     expandComponents: false, // Do not create virtual fields
                     mesgListener: (mesgNum, message) => {
                         
-                        // 2. SHIFT TIMESTAMPS (Simple math on raw integers)
+                        // 2. SHIFT TIMESTAMPS
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // 3. STRIP EXPANDED FIELDS (Standard SDK Method)
-                        Utils.removeExpandedFields(message);
+                        // 3. STRIP EXPANDED FIELDS: Official SDK Method
+                        if (Utils && Utils.removeExpandedFields) {
+                            Utils.removeExpandedFields(message);
+                        }
 
-                        // 4. MANUAL SANITIZER: Some SDK versions leave virtual fields
-                        // We delete any property that isn't a raw field number or standard name
+                        // 4. MANUAL SANITIZER: Cleanup for problematic virtual fields
                         for (const key in message) {
                             if (key.endsWith('_date') || key.endsWith('_units') || key.includes('enhanced_')) {
                                 delete message[key];
@@ -82,7 +83,7 @@
                             encoder.onMesg(mesgNum, message);
                             count++;
                         } catch (e) {
-                            // This logs the EXACT field causing the problem in F12 Console
+                            // Detailed logging for rejection
                             console.warn(`Record ${mesgNum} rejected: ${e.message}`, e.cause);
                         }
                     }
@@ -91,7 +92,7 @@
                 // 6. FINALIZE
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("Encoder rejected all records. Check F12 console for 'cause'.");
+                if (count === 0) throw new Error("Encoder rejected all records. Check Console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
