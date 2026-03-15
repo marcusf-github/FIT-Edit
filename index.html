@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (Async Fix)</title>
+    <title>FIT Time Shifter (Clean Mode)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 500px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 2rem; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
@@ -21,13 +21,14 @@
         <input type="file" id="fileInput" accept=".fit">
         <label>2. Shift seconds:</label>
         <input type="number" id="offset" value="0">
-        <button id="runBtn">Process & Download</button>
+        <button id="runBtn">Shift & Download</button>
     </div>
 
-    <div id="statusBox" class="status">Waiting...</div>
+    <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=async_fix';
+        // Import Utils as well - it's the key to fixing the encoding error
+        import { Decoder, Stream, Encoder, Utils } from './index.js?v=clean_fix';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -39,7 +40,7 @@
             if (fileInput.files.length === 0) return alert("Select a file!");
             const file = fileInput.files[0];
 
-            statusBox.innerHTML = "⏳ Processing (Async Mode)...";
+            statusBox.innerHTML = "⏳ Cleaning and shifting data...";
             statusBox.className = "status";
 
             try {
@@ -49,27 +50,35 @@
                 const encoder = new Encoder();
                 let count = 0;
 
-                // THE FIX: In the new SDK, decoder.read() triggers listeners 
-                // but you must ensure the stream is read fully.
+                // 1. Read with strict raw settings
                 decoder.read({
                     convertTimestamp: false, 
                     convertUnits: false,
+                    expandComponents: false,
                     mesgListener: (mesgNum, message) => {
-                        // Apply shift
+                        // 2. SHIFT TIMESTAMPS
                         if (message.timestamp !== undefined) message.timestamp += offset;
                         if (message.startTime !== undefined) message.startTime += offset;
                         if (message.startDate !== undefined) message.startDate += offset;
 
-                        // Pipe to encoder
-                        encoder.onMesg(mesgNum, message);
-                        count++;
+                        // 3. THE CRITICAL FIX: Strip non-binary fields
+                        // This removes things like "distance_units" or "speed_kmh" 
+                        // which cause the Encoder to fail.
+                        Utils.removeExpandedFields(message);
+
+                        try {
+                            encoder.onMesg(mesgNum, message);
+                            count++;
+                        } catch (e) {
+                            console.warn("Encoder rejected a record:", e.message);
+                        }
                     }
                 });
 
-                // Finalize
+                // 4. Finalize
                 const result = encoder.close();
 
-                if (count === 0) throw new Error("No data records were captured by the listener.");
+                if (count === 0) throw new Error("No valid records were written. Check browser console (F12).");
 
                 const blob = new Blob([result], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
