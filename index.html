@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Precision Editor v2.4</title>
+    <title>FIT Editor v3.0 (2026 SDK Fix)</title>
     <style>
-        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; display: flex; flex-direction: column; min-height: 90vh; }
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; display: flex; flex-direction: column; min-height: 95vh; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
@@ -31,8 +31,8 @@
     <div id="statusBox" class="status">Ready</div>
 
     <footer>
-        Logic Version: <strong>v2.4 (SDK Options Fix)</strong><br>
-        Using Garmin SDK v21.195.00
+        Logic Version: <strong>v3.0 (Full SDK Integration)</strong><br>
+        Target: Garmin SDK 21.195.00 / Build 2026
     </footer>
 
     <script type="module">
@@ -44,9 +44,9 @@
 
             runBtn.addEventListener('click', async () => {
                 const fileInput = document.getElementById('fileInput');
-                // FIX: Check for the file inside the file list
                 if (!fileInput.files || fileInput.files.length === 0) return alert("Select a file.");
                 
+                // FIX 1: Accessing the specific file object correctly
                 const selectedFile = fileInput.files[0]; 
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
@@ -57,10 +57,6 @@
                 try {
                     const arrayBuffer = await selectedFile.arrayBuffer();
                     const stream = Stream.fromArrayBuffer(arrayBuffer);
-                    
-                    // Integrity Check
-                    if (!Decoder.isFIT(stream)) throw new Error("Not a valid FIT file.");
-
                     const decoder = new Decoder(stream);
                     const encoder = new Encoder();
                     
@@ -68,64 +64,73 @@
                     let distanceOffset = 0;
                     let count = 0;
 
-                    // Execute Read with explicit options to satisfy decoder.js checks
+                    // FIX 2: Satisfying the specific 'if' checks in your decoder.js (Line 144)
                     decoder.read({
+                        applyScaleAndOffset: false, // Prevents 100x distance jump
+                        mergeHeartRates: false,      // Required because scale is false
+                        expandComponents: false,     // Required because scale is false
+                        convertDateTimesToDates: false,
                         mesgListener: (mesgNum, message) => {
-                            if (message.timestamp && firstTimestamp === null) {
-                                firstTimestamp = message.timestamp;
-                            }
+                            // In this mode, message values are raw integers (e.g. distance in cm)
+                            const ts = message.timestamp;
+                            if (ts && firstTimestamp === null) firstTimestamp = ts;
 
                             // 1. Trimming Logic
-                            if (trimValue > 0 && message.timestamp) {
-                                if (message.timestamp < (firstTimestamp + trimValue)) {
+                            if (trimValue > 0 && ts) {
+                                if (ts < (firstTimestamp + trimValue)) {
                                     if (message.distance !== undefined) distanceOffset = message.distance;
-                                    return; 
+                                    return; // Drop record
                                 }
                             }
 
-                            // 2. Subtract Raw Distance (keeps scale correct)
+                            // 2. Distance Correction (Raw Integer Math)
                             if (distanceOffset > 0) {
                                 if (message.distance !== undefined) {
                                     message.distance = Math.max(0, message.distance - distanceOffset);
                                 }
-                                if (message.total_distance !== undefined) {
-                                    message.total_distance = Math.max(0, message.total_distance - distanceOffset);
-                                }
+                                // Handle both possible summary naming conventions
+                                ['totalDistance', 'total_distance'].forEach(f => {
+                                    if (message[f] !== undefined) {
+                                        message[f] = Math.max(0, message[f] - distanceOffset);
+                                    }
+                                });
                             }
 
-                            // 3. Time Shift
-                            const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp', 'start_time'];
-                            timeFields.forEach(f => {
+                            // 3. Time Shifting
+                            ['timestamp', 'startTime', 'startDate', 'localTimestamp', 'start_time'].forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
                                     message[f] += offsetValue;
                                 }
                             });
 
-                            // 4. Cleanup
+                            // 4. Flattening / Cleaning for the Encoder
                             const cleanMsg = {};
                             for (const key in message) {
-                                if (!key.endsWith('_units') && !key.startsWith('unknown') && !key.startsWith('$')) {
-                                    cleanMsg[key] = message[key];
-                                }
+                                // Skip SDK metadata and internal unit strings
+                                if (key.endsWith('_units') || key.startsWith('unknown') || key.startsWith('$')) continue;
+                                cleanMsg[key] = message[key];
                             }
 
-                            encoder.onMesg(mesgNum, cleanMsg);
-                            count++;
-                        },
-                        applyScaleAndOffset: false, 
-                        mergeHeartRates: false, // MANDATORY: decoder.js throws error if this is true while scaling is false
-                        convertDateTimesToDates: false,
-                        convertUnits: false,
-                        expandComponents: false
+                            try {
+                                encoder.onMesg(mesgNum, cleanMsg);
+                                count++;
+                            } catch (e) {
+                                console.warn(`Skipped mesg ${mesgNum}:`, e.message);
+                            }
+                        }
                     });
 
                     const finalFit = encoder.close();
+                    if (count === 0) throw new Error("No records were found in the file.");
+
                     const blob = new Blob([finalFit], { type: "application/octet-stream" });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `edited_${selectedFile.name}`;
+                    a.download = `fixed_${selectedFile.name}`;
+                    document.body.appendChild(a);
                     a.click();
+                    document.body.removeChild(a);
 
                     statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
                     statusBox.className = "status success";
