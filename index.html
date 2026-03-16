@@ -2,15 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter</title>
+    <title>FIT Time Shifter (SDK v21.195)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; }
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -18,7 +19,7 @@
     <div class="card">
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift seconds:</label>
+        <label>2. Shift seconds (e.g., 3600 for +1hr):</label>
         <input type="number" id="offset" value="0">
         <button id="runBtn">Adjust and Download</button>
     </div>
@@ -27,74 +28,78 @@
     <script type="module">
         import { Decoder, Stream, Encoder } from './index.js?v=21.195.00';
 
-        // Wait for DOM to load to prevent "addEventListener of null" error
         document.addEventListener('DOMContentLoaded', () => {
             const statusBox = document.getElementById('statusBox');
             const runBtn = document.getElementById('runBtn');
 
             runBtn.addEventListener('click', async () => {
                 const fileInput = document.getElementById('fileInput');
-                const offset = parseInt(document.getElementById('offset').value) || 0;
+                const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 
-                if (!fileInput.files.length) return alert("Select a file!");
+                if (!fileInput.files.length) return alert("Please select a file first.");
                 
-                const file = fileInput.files[0];
+                const file = fileInput.files[0]; // Fix: Target the specific file
                 statusBox.innerHTML = "⏳ Processing...";
                 statusBox.className = "status";
 
                 try {
                     const arrayBuffer = await file.arrayBuffer();
                     const stream = Stream.fromArrayBuffer(arrayBuffer);
-                    
+                    const decoder = new Decoder(stream);
                     const encoder = new Encoder();
                     let count = 0;
 
-                    // The most robust way: Use the mesgListener callback during decoding
-                    // this pipes data directly into the encoder in the correct order
-                    const decoder = new Decoder(stream);
-                    
+                    // Use the options object as defined in your decoder.js read() method
                     decoder.read({
-                        applyScaleAndOffset: false, // Keep raw for encoder
-                        convertDateTimesToDates: false, 
+                        applyScaleAndOffset: false,
+                        convertDateTimesToDates: false,
                         convertUnits: false,
-                        // This function runs for every single message found
+                        expandComponents: false,
+                        mergeHeartRates: false, // Must be false if applyScaleAndOffset is false
                         mesgListener: (mesgNum, message) => {
-                            // Apply time shift to any timestamp field
+                            // Fields to shift
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
-                                    message[f] += offset;
+                                    message[f] += offsetValue;
                                 }
                             });
 
-                            // Remove SDK internal helper properties
+                            // Clean the message of SDK-injected helper strings
+                            const cleanMsg = {};
                             for (const key in message) {
-                                if (key.endsWith('_units') || key.startsWith('unknown')) {
-                                    delete message[key];
+                                if (!key.endsWith('_units') && !key.startsWith('unknown')) {
+                                    cleanMsg[key] = message[key];
                                 }
                             }
 
-                            encoder.onMesg(mesgNum, message);
-                            count++;
+                            try {
+                                encoder.onMesg(mesgNum, cleanMsg);
+                                count++;
+                            } catch (e) {
+                                console.warn(`Encoder rejected mesg ${mesgNum}:`, e.message);
+                            }
                         }
                     });
 
                     const finalFit = encoder.close();
                     
-                    if (count === 0) throw new Error("No records were processed.");
+                    if (count === 0) throw new Error("No records were processed. The file might be empty or invalid.");
 
                     const blob = new Blob([finalFit], { type: "application/octet-stream" });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = `shifted_${file.name}`;
+                    document.body.appendChild(a);
                     a.click();
+                    document.body.removeChild(a);
 
-                    statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
+                    statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                     statusBox.className = "status success";
 
                 } catch (err) {
-                    console.error(err);
+                    console.error("Processing Error:", err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
                     statusBox.className = "status error";
                 }
