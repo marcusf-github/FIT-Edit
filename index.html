@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Activity Editor: Precision Trim</title>
+    <title>FIT Precision Editor</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -21,18 +21,10 @@
     <div class="card">
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        
         <div class="row">
-            <div>
-                <label>2. Shift Time (sec):</label>
-                <input type="number" id="offset" value="0">
-            </div>
-            <div>
-                <label>3. Trim Start (sec):</label>
-                <input type="number" id="trimSec" value="0" min="0">
-            </div>
+            <div><label>Shift Time (sec):</label><input type="number" id="offset" value="0"></div>
+            <div><label>Trim Start (sec):</label><input type="number" id="trimSec" value="0" min="0"></div>
         </div>
-        
         <button id="runBtn">Process and Download</button>
     </div>
     <div id="statusBox" class="status">Ready</div>
@@ -49,7 +41,7 @@
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
                 
-                if (!fileInput.files.length) return alert("Please select a file.");
+                if (!fileInput.files.length) return alert("Select a file.");
                 
                 const file = fileInput.files[0];
                 statusBox.innerHTML = "⏳ Processing...";
@@ -61,20 +53,17 @@
                     const decoder = new Decoder(stream);
                     const encoder = new Encoder();
                     
-                    let count = 0;
                     let firstTimestamp = null;
-                    let distanceOffset = 0;
-                    let offsetLocked = false;
-                    let recordsDropped = 0;
+                    let distanceOffset = null;
+                    let count = 0;
 
                     decoder.read({
-                        applyScaleAndOffset: false,
+                        applyScaleAndOffset: true, // Work with real meters/seconds
                         convertDateTimesToDates: false,
                         convertUnits: false,
                         expandComponents: false,
-                        mergeHeartRates: false,
                         mesgListener: (mesgNum, message) => {
-                            // 1. Establish activity start time
+                            // 1. Initial timestamp
                             if (message.timestamp && firstTimestamp === null) {
                                 firstTimestamp = message.timestamp;
                             }
@@ -82,33 +71,26 @@
                             // 2. Trimming Logic
                             if (trimValue > 0 && message.timestamp) {
                                 if (message.timestamp < (firstTimestamp + trimValue)) {
-                                    // Update the cumulative distance offset while trimming
-                                    if (message.distance !== undefined) {
-                                        distanceOffset = message.distance;
-                                    }
-                                    recordsDropped++;
-                                    return; // Skip this record
+                                    return; // Skip
                                 }
                             }
 
-                            // 3. Lock the Distance Offset for remaining records
-                            // This ensures the very first record after the trim is exactly 0.
-                            if (!offsetLocked && message.distance !== undefined) {
-                                distanceOffset = message.distance; 
-                                offsetLocked = true;
+                            // 3. Set distance baseline for the FIRST record kept
+                            if (distanceOffset === null && message.distance !== undefined) {
+                                distanceOffset = message.distance;
                             }
 
-                            // 4. Correct Cumulative Distance
-                            if (message.distance !== undefined) {
-                                message.distance = Math.max(0, message.distance - distanceOffset);
+                            // 4. Subtract offset from distance fields
+                            if (distanceOffset !== null) {
+                                if (message.distance !== undefined) {
+                                    message.distance = Math.max(0, message.distance - distanceOffset);
+                                }
+                                if (message.totalDistance !== undefined) {
+                                    message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
+                                }
                             }
 
-                            // 5. Correct Summary Distance (Session/Lap)
-                            if (message.totalDistance !== undefined) {
-                                message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
-                            }
-
-                            // 6. Time Shifting Logic (Apply to all date fields)
+                            // 5. Shift Time
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
@@ -116,10 +98,11 @@
                                 }
                             });
 
-                            // 7. Clean and Encode (Note: Speed fields are left unchanged as requested)
+                            // 6. Clean message for Encoder
                             const cleanMsg = {};
                             for (const key in message) {
-                                if (!key.endsWith('_units') && !key.startsWith('unknown')) {
+                                // Important: remove developer fields or unit strings that confuse the encoder
+                                if (!key.endsWith('_units') && !key.startsWith('unknown') && !key.startsWith('$')) {
                                     cleanMsg[key] = message[key];
                                 }
                             }
@@ -128,14 +111,12 @@
                                 encoder.onMesg(mesgNum, cleanMsg);
                                 count++;
                             } catch (e) {
-                                console.warn(`Encoder rejected record:`, e.message);
+                                console.warn(`Skipped mesg ${mesgNum}:`, e.message);
                             }
                         }
                     });
 
                     const finalFit = encoder.close();
-                    if (count === 0) throw new Error("No records remained after processing.");
-
                     const blob = new Blob([finalFit], { type: "application/octet-stream" });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -143,9 +124,8 @@
                     a.download = `edited_${file.name}`;
                     a.click();
 
-                    statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
+                    statusBox.innerHTML = `✅ Processed ${count} records.`;
                     statusBox.className = "status success";
-
                 } catch (err) {
                     console.error(err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
