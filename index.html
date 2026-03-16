@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Precision Editor</title>
+    <title>FIT Precision Editor v2.2</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; display: flex; flex-direction: column; min-height: 90vh; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -31,7 +31,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <footer>
-        Current Logic Version: <strong>v2.1 (Scaled Distance Fix)</strong><br>
+        Logic Version: <strong>v2.2 (Buffer & Scaling Fix)</strong><br>
         Using Garmin SDK v21.195.00
     </footer>
 
@@ -46,6 +46,7 @@
                 const fileInput = document.getElementById('fileInput');
                 if (!fileInput.files.length) return alert("Select a file.");
                 
+                // FIX: Access the first file in the list
                 const file = fileInput.files[0]; 
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
@@ -61,11 +62,10 @@
                     
                     let firstTimestamp = null;
                     let distanceOffset = 0;
-                    let offsetLocked = false;
                     let count = 0;
 
                     decoder.read({
-                        applyScaleAndOffset: true, // Crucial: Decoder handles 100x scaling for us
+                        applyScaleAndOffset: false, // Keep raw integers to avoid 100x corruption
                         convertDateTimesToDates: false,
                         convertUnits: false,
                         expandComponents: false,
@@ -74,7 +74,7 @@
                                 firstTimestamp = message.timestamp;
                             }
 
-                            // 1. Trimming
+                            // 1. Trimming Logic
                             if (trimValue > 0 && message.timestamp) {
                                 if (message.timestamp < (firstTimestamp + trimValue)) {
                                     if (message.distance !== undefined) distanceOffset = message.distance;
@@ -82,21 +82,17 @@
                                 }
                             }
 
-                            // 2. Lock the Distance Offset at the first kept record
-                            if (!offsetLocked && message.distance !== undefined) {
-                                distanceOffset = message.distance; 
-                                offsetLocked = true;
+                            // 2. Subtract Raw Distance (stored as cm/scaled ints in FIT)
+                            if (distanceOffset > 0) {
+                                if (message.distance !== undefined) {
+                                    message.distance = Math.max(0, message.distance - distanceOffset);
+                                }
+                                if (message.total_distance !== undefined) {
+                                    message.total_distance = Math.max(0, message.total_distance - distanceOffset);
+                                }
                             }
 
-                            // 3. Deduct Distance (Scaling is handled by SDK)
-                            if (message.distance !== undefined) {
-                                message.distance = Math.max(0, message.distance - distanceOffset);
-                            }
-                            if (message.totalDistance !== undefined) {
-                                message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
-                            }
-
-                            // 4. Time Shift
+                            // 3. Time Shift (Seconds)
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp', 'start_time'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
@@ -104,7 +100,7 @@
                                 }
                             });
 
-                            // 5. Clean and Encode (Speed fields left raw/scaled as requested)
+                            // 4. Cleanup and Encode
                             const cleanMsg = {};
                             for (const key in message) {
                                 if (!key.endsWith('_units') && !key.startsWith('unknown') && !key.startsWith('$')) {
@@ -129,7 +125,7 @@
                     a.download = `edited_${file.name}`;
                     a.click();
 
-                    statusBox.innerHTML = `✅ Processed ${count} records.`;
+                    statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
                     statusBox.className = "status success";
                 } catch (err) {
                     console.error(err);
