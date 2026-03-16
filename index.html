@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Precision Editor</title>
+    <title>FIT Precision Editor (v21.195)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
         .error { background: #fee; color: #d00; border: 1px solid #fcc; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
         button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; }
@@ -38,12 +38,12 @@
 
             runBtn.addEventListener('click', async () => {
                 const fileInput = document.getElementById('fileInput');
+                if (!fileInput.files.length) return alert("Select a file.");
+                
+                const file = fileInput.files[0]; // CRITICAL FIX: Target the first file
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
                 
-                if (!fileInput.files.length) return alert("Select a file.");
-                
-                const file = fileInput.files[0];
                 statusBox.innerHTML = "⏳ Processing...";
                 statusBox.className = "status";
 
@@ -58,50 +58,49 @@
                     let count = 0;
 
                     decoder.read({
-                        applyScaleAndOffset: true, // Work with real meters/seconds
+                        applyScaleAndOffset: true, // Let Decoder handle the 100x scaling for us
                         convertDateTimesToDates: false,
                         convertUnits: false,
                         expandComponents: false,
                         mesgListener: (mesgNum, message) => {
-                            // 1. Initial timestamp
                             if (message.timestamp && firstTimestamp === null) {
                                 firstTimestamp = message.timestamp;
                             }
 
-                            // 2. Trimming Logic
+                            // 1. Trimming
                             if (trimValue > 0 && message.timestamp) {
-                                if (message.timestamp < (firstTimestamp + trimValue)) {
-                                    return; // Skip
-                                }
+                                if (message.timestamp < (firstTimestamp + trimValue)) return;
                             }
 
-                            // 3. Set distance baseline for the FIRST record kept
+                            // 2. Lock distance at the moment we start keeping records
                             if (distanceOffset === null && message.distance !== undefined) {
                                 distanceOffset = message.distance;
                             }
 
-                            // 4. Subtract offset from distance fields
+                            // 3. Deduct Distance (Meters)
                             if (distanceOffset !== null) {
                                 if (message.distance !== undefined) {
                                     message.distance = Math.max(0, message.distance - distanceOffset);
+                                }
+                                if (message.total_distance !== undefined) {
+                                    message.total_distance = Math.max(0, message.total_distance - distanceOffset);
                                 }
                                 if (message.totalDistance !== undefined) {
                                     message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
                                 }
                             }
 
-                            // 5. Shift Time
-                            const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
+                            // 4. Time Shift
+                            const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp', 'start_time'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
                                     message[f] += offsetValue;
                                 }
                             });
 
-                            // 6. Clean message for Encoder
+                            // 5. Cleanup for Encoder
                             const cleanMsg = {};
                             for (const key in message) {
-                                // Important: remove developer fields or unit strings that confuse the encoder
                                 if (!key.endsWith('_units') && !key.startsWith('unknown') && !key.startsWith('$')) {
                                     cleanMsg[key] = message[key];
                                 }
@@ -111,7 +110,7 @@
                                 encoder.onMesg(mesgNum, cleanMsg);
                                 count++;
                             } catch (e) {
-                                console.warn(`Skipped mesg ${mesgNum}:`, e.message);
+                                console.warn(`Skipped ${mesgNum}:`, e.message);
                             }
                         }
                     });
