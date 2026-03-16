@@ -2,32 +2,31 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Time Shifter (v21.195.00 Final)</title>
+    <title>FIT Time Shifter (SDK Fix)</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
-        .error { background: #fee; color: #d00; border: 1px solid #fcc; font-size: 0.85rem; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; font-size: 0.9rem; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
         .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px;}
         input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
     </style>
 </head>
 <body>
-
     <h1>FIT Time Shifter</h1>
     <div class="card">
-        <label>1. Select Strava .fit file:</label>
+        <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        <label>2. Shift seconds:</label>
+        <label>2. Shift seconds (e.g., 3600 for +1hr):</label>
         <input type="number" id="offset" value="0">
         <button id="runBtn">Adjust and Download</button>
     </div>
-
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder, Profile, Utils } from './index.js?v=21.195.00';
+        import { Decoder, Stream, Encoder, Profile } from './index.js?v=21.195.00';
 
         const statusBox = document.getElementById('statusBox');
         const runBtn = document.getElementById('runBtn');
@@ -35,11 +34,11 @@
         runBtn.addEventListener('click', async () => {
             const fileInput = document.getElementById('fileInput');
             const offset = parseInt(document.getElementById('offset').value) || 0;
-
+            
             if (fileInput.files.length === 0) return alert("Select a file!");
+            
             const file = fileInput.files[0];
-
-            statusBox.innerHTML = "⏳ Decoding and cleaning records...";
+            statusBox.innerHTML = "⏳ Processing...";
             statusBox.className = "status";
 
             try {
@@ -47,56 +46,60 @@
                 const stream = Stream.fromArrayBuffer(arrayBuffer);
                 const decoder = new Decoder(stream);
                 
-                // 1. Decode EVERYTHING at once. Your decoder.js returns {messages, errors}
-                const result = decoder.read({
-                    convertDateTimesToDates: false, 
+                // CRITICAL: We must NOT convert dates or apply scales. 
+                // The Encoder.js transformValue() logic prefers raw FIT types.
+                const { messages } = decoder.read({
+                    convertDateTimesToDates: false,
                     convertUnits: false,
-                    expandComponents: false
+                    expandComponents: false,
+                    applyScaleAndOffset: false 
                 });
 
-                const messages = result.messages;
                 const encoder = new Encoder();
                 let count = 0;
 
-                // 2. Loop through the decoded messages object
-                for (const mesgName in messages) {
+                // The decoder returns messages grouped by name: { record: [...], lap: [...] }
+                for (const [mesgName, mesgArray] of Object.entries(messages)) {
+                    // Profile.MesgNum contains the mapping (e.g. RECORD: 20)
                     const mesgNum = Profile.MesgNum[mesgName.toUpperCase()];
                     if (mesgNum === undefined) continue;
 
-                    messages[mesgName].forEach(msg => {
-                        // Apply time shift
-                        if (msg.timestamp !== undefined) msg.timestamp += offset;
-                        if (msg.startTime !== undefined) msg.startTime += offset;
-                        if (msg.startDate !== undefined) msg.startDate += offset;
+                    mesgArray.forEach(msg => {
+                        // 1. Shift timestamp fields. 
+                        // Since we didn't convert to Dates, these are raw seconds since 1989-12-31.
+                        const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
+                        timeFields.forEach(field => {
+                            if (msg[field] !== undefined && typeof msg[field] === 'number') {
+                                msg[field] += offset;
+                            }
+                        });
 
-                        // 3. WHITELIST: Only keep primitive fields (Numbers/Strings)
-                        // This prevents Strava's 'developer' junk from breaking the Encoder
+                        // 2. Clean Message: remove helper properties added by the Decoder
+                        // that aren't part of the FIT profile.
                         const cleanMsg = {};
                         for (const key in msg) {
-                            const val = msg[key];
-                            if (key.includes('enhanced') || key.includes('developer') || key.endsWith('_units')) continue;
+                            // Skip SDK internal helpers and units
+                            if (key.startsWith('unknown') || key.endsWith('_units')) continue;
                             
-                            if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
+                            const val = msg[key];
+                            // Only include valid FIT types: Number, String, BigInt, Boolean
+                            if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean' || typeof val === 'bigint') {
                                 cleanMsg[key] = val;
                             }
                         }
 
-                        if (Utils && Utils.removeExpandedFields) {
-                            Utils.removeExpandedFields(cleanMsg);
-                        }
-
                         try {
-                            // 4. Pipe to Encoder
                             encoder.onMesg(mesgNum, cleanMsg);
                             count++;
                         } catch (e) {
-                            console.warn(`Skipped ${mesgName}:`, e.message);
+                            console.warn(`Dropped ${mesgName} record:`, e.message, cleanMsg);
                         }
                     });
                 }
 
                 const finalFit = encoder.close();
-                if (count === 0) throw new Error("The Encoder rejected every record.");
+                
+                if (count === 0) throw new Error("The Encoder rejected every record. Check console (F12).");
 
                 const blob = new Blob([finalFit], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
@@ -109,7 +112,7 @@
                 statusBox.className = "status success";
 
             } catch (err) {
-                console.error(err);
+                console.error("Full Error Context:", err);
                 statusBox.innerHTML = "❌ Error: " + err.message;
                 statusBox.className = "status error";
             }
