@@ -1,94 +1,105 @@
-<script type="module">
-    import { Decoder, Stream, Encoder, Profile } from './index.js?v=21.195.00';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FIT Time Shifter</title>
+    <style>
+        body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
+        .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; text-align: center; }
+        .error { background: #fee; color: #d00; border: 1px solid #fcc; }
+        .success { background: #efe; color: #2d6a4f; border: 1px solid #cfc; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        input { padding: 10px; margin-bottom: 15px; width: 100%; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+    <h1>FIT Time Shifter</h1>
+    <div class="card">
+        <label>1. Select .fit file:</label>
+        <input type="file" id="fileInput" accept=".fit">
+        <label>2. Shift seconds:</label>
+        <input type="number" id="offset" value="0">
+        <button id="runBtn">Adjust and Download</button>
+    </div>
+    <div id="statusBox" class="status">Ready</div>
 
-    const statusBox = document.getElementById('statusBox');
-    const runBtn = document.getElementById('runBtn');
+    <script type="module">
+        import { Decoder, Stream, Encoder } from './index.js?v=21.195.00';
 
-    runBtn.addEventListener('click', async () => {
-        const fileInput = document.getElementById('fileInput');
-        const offset = parseInt(document.getElementById('offset').value) || 0;
-        
-        if (fileInput.files.length === 0) return alert("Select a file!");
-        
-        const file = fileInput.files[0]; // Fix: select the first file from the list
-        statusBox.innerHTML = "⏳ Processing...";
-        statusBox.className = "status";
+        // Wait for DOM to load to prevent "addEventListener of null" error
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusBox = document.getElementById('statusBox');
+            const runBtn = document.getElementById('runBtn');
 
-        try {
-            const arrayBuffer = await file.arrayBuffer();
-            const stream = Stream.fromArrayBuffer(arrayBuffer);
-            const decoder = new Decoder(stream);
-            
-            // Decode with raw values to prevent encoder rejection
-            const { messages } = decoder.read({
-                convertDateTimesToDates: false,
-                convertUnits: false,
-                expandComponents: false,
-                applyScaleAndOffset: false 
-            });
-
-            const encoder = new Encoder();
-            let count = 0;
-
-            // Mapping camelCase keys to Profile.MesgNum constants
-            const getMesgNum = (name) => {
-                // Try converting camelCase to CONSTANT_CASE (e.g., fileId -> FILE_ID)
-                const constantName = name.replace(/([A-Z])/g, "_$1").toUpperCase();
-                return Profile.MesgNum[constantName] || Profile.MesgNum[name.toUpperCase()];
-            };
-
-            for (const [mesgName, mesgArray] of Object.entries(messages)) {
-                const mesgNum = getMesgNum(mesgName);
+            runBtn.addEventListener('click', async () => {
+                const fileInput = document.getElementById('fileInput');
+                const offset = parseInt(document.getElementById('offset').value) || 0;
                 
-                if (mesgNum === undefined) {
-                    console.warn(`Unknown message type: ${mesgName}`);
-                    continue;
-                }
+                if (!fileInput.files.length) return alert("Select a file!");
+                
+                const file = fileInput.files[0];
+                statusBox.innerHTML = "⏳ Processing...";
+                statusBox.className = "status";
 
-                mesgArray.forEach(msg => {
-                    // Shift timestamp fields (raw integers)
-                    const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
-                    timeFields.forEach(field => {
-                        if (msg[field] !== undefined && typeof msg[field] === 'number') {
-                            msg[field] += offset;
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const stream = Stream.fromArrayBuffer(arrayBuffer);
+                    
+                    const encoder = new Encoder();
+                    let count = 0;
+
+                    // The most robust way: Use the mesgListener callback during decoding
+                    // this pipes data directly into the encoder in the correct order
+                    const decoder = new Decoder(stream);
+                    
+                    decoder.read({
+                        applyScaleAndOffset: false, // Keep raw for encoder
+                        convertDateTimesToDates: false, 
+                        convertUnits: false,
+                        // This function runs for every single message found
+                        mesgListener: (mesgNum, message) => {
+                            // Apply time shift to any timestamp field
+                            const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
+                            timeFields.forEach(f => {
+                                if (message[f] !== undefined && typeof message[f] === 'number') {
+                                    message[f] += offset;
+                                }
+                            });
+
+                            // Remove SDK internal helper properties
+                            for (const key in message) {
+                                if (key.endsWith('_units') || key.startsWith('unknown')) {
+                                    delete message[key];
+                                }
+                            }
+
+                            encoder.onMesg(mesgNum, message);
+                            count++;
                         }
                     });
 
-                    // Remove non-standard fields that cause Encoder failure
-                    const cleanMsg = {};
-                    for (const key in msg) {
-                        if (key.startsWith('unknown') || key.endsWith('_units')) continue;
-                        cleanMsg[key] = msg[key];
-                    }
+                    const finalFit = encoder.close();
+                    
+                    if (count === 0) throw new Error("No records were processed.");
 
-                    try {
-                        encoder.onMesg(mesgNum, cleanMsg);
-                        count++;
-                    } catch (e) {
-                        // If one record fails, we log it but keep going
-                        console.error(`Encoder error in ${mesgName}:`, e.message, cleanMsg);
-                    }
-                });
-            }
+                    const blob = new Blob([finalFit], { type: "application/octet-stream" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `shifted_${file.name}`;
+                    a.click();
 
-            const finalFit = encoder.close();
-            
-            if (count === 0) throw new Error("The Encoder rejected every record. Check Console (F12) for 'Encoder error' logs.");
+                    statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
+                    statusBox.className = "status success";
 
-            const blob = new Blob([finalFit], { type: "application/octet-stream" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `shifted_${file.name}`;
-            a.click();
-
-            statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
-            statusBox.className = "status success";
-
-        } catch (err) {
-            console.error("Full Error Context:", err);
-            statusBox.innerHTML = "❌ Error: " + err.message;
-            statusBox.className = "status error";
-        }
-    });
-</script>
+                } catch (err) {
+                    console.error(err);
+                    statusBox.innerHTML = "❌ Error: " + err.message;
+                    statusBox.className = "status error";
+                }
+            });
+        });
+    </script>
+</body>
+</html>
