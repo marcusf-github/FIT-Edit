@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Activity Editor: Shift & Trim</title>
+    <title>FIT Editor: Precision Trim</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -21,7 +21,6 @@
     <div class="card">
         <label>1. Select .fit file:</label>
         <input type="file" id="fileInput" accept=".fit">
-        
         <div class="row">
             <div>
                 <label>2. Shift Time (sec):</label>
@@ -32,13 +31,12 @@
                 <input type="number" id="trimSec" value="0" min="0">
             </div>
         </div>
-        
         <button id="runBtn">Process and Download</button>
     </div>
     <div id="statusBox" class="status">Ready</div>
 
     <script type="module">
-        import { Decoder, Stream, Encoder } from './index.js?v=21.195.00';
+        import { Decoder, Stream, Encoder, Profile } from './index.js?v=21.195.00';
 
         document.addEventListener('DOMContentLoaded', () => {
             const statusBox = document.getElementById('statusBox');
@@ -49,7 +47,7 @@
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
                 
-                if (!fileInput.files.length) return alert("Please select a file.");
+                if (!fileInput.files.length) return alert("Select a file.");
                 
                 const file = fileInput.files[0];
                 statusBox.innerHTML = "⏳ Processing...";
@@ -63,9 +61,8 @@
                     
                     let count = 0;
                     let firstTimestamp = null;
-                    let distanceOffset = 0; 
-                    let recordsDropped = 0;
-                    let lastDistance = 0;
+                    let distanceOffset = 0;
+                    let isFirstKeptRecord = true;
 
                     decoder.read({
                         applyScaleAndOffset: false,
@@ -74,7 +71,7 @@
                         expandComponents: false,
                         mergeHeartRates: false,
                         mesgListener: (mesgNum, message) => {
-                            // 1. Establish the original start time
+                            // 1. Get the original starting point
                             if (message.timestamp && firstTimestamp === null) {
                                 firstTimestamp = message.timestamp;
                             }
@@ -82,29 +79,37 @@
                             // 2. Trimming Logic
                             if (trimValue > 0 && message.timestamp) {
                                 if (message.timestamp < (firstTimestamp + trimValue)) {
-                                    // Capture the distance at the moment we trim so we can subtract it later
+                                    // Continuously update the offset until we hit the trim limit
                                     if (message.distance !== undefined) {
                                         distanceOffset = message.distance;
                                     }
-                                    recordsDropped++;
                                     return; // Skip this record
                                 }
                             }
 
-                            // 3. Distance Correction (Normalization)
-                            // We subtract the distance we skipped so the new start is 0.0m
-                            if (distanceOffset > 0 && message.distance !== undefined) {
-                                message.distance = Math.max(0, message.distance - distanceOffset);
-                                lastDistance = message.distance; // Track for summary update
+                            // 3. Handle the very first record after the trim
+                            if (isFirstKeptRecord && mesgNum === Profile.MesgNum.RECORD) {
+                                if (message.distance !== undefined) {
+                                    distanceOffset = message.distance; // Final capture
+                                }
+                                // Force the first record of the new file to start at 0
+                                if (message.distance !== undefined) message.distance = 0;
+                                if (message.speed !== undefined) message.speed = 0;
+                                if (message.enhanced_speed !== undefined) message.enhanced_speed = 0;
+                                isFirstKeptRecord = false;
+                            } else {
+                                // 4. Normalize distance for all subsequent records
+                                if (distanceOffset > 0 && message.distance !== undefined) {
+                                    message.distance = Math.max(0, message.distance - distanceOffset);
+                                }
                             }
 
-                            // 4. Update Summaries (Session/Lap)
-                            // If we trimmed data, the 'totalDistance' in summaries is now wrong.
+                            // 5. Update Summaries (Session/Lap)
                             if (distanceOffset > 0 && message.totalDistance !== undefined) {
                                 message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
                             }
 
-                            // 5. Time Shifting Logic
+                            // 6. Shift Time
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
@@ -112,7 +117,7 @@
                                 }
                             });
 
-                            // 6. Data Cleaning & Encoding
+                            // 7. Clean and Encode
                             const cleanMsg = {};
                             for (const key in message) {
                                 if (!key.endsWith('_units') && !key.startsWith('unknown')) {
@@ -124,29 +129,23 @@
                                 encoder.onMesg(mesgNum, cleanMsg);
                                 count++;
                             } catch (e) {
-                                console.warn(`Encoder rejected mesg ${mesgNum}:`, e.message);
+                                console.warn(`Encoder rejected:`, e.message);
                             }
                         }
                     });
 
                     const finalFit = encoder.close();
-                    
-                    if (count === 0) throw new Error("No records remained after trimming.");
-
                     const blob = new Blob([finalFit], { type: "application/octet-stream" });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `edited_${file.name}`;
-                    document.body.appendChild(a);
+                    a.download = `fixed_${file.name}`;
                     a.click();
-                    document.body.removeChild(a);
 
-                    statusBox.innerHTML = `✅ Success! Wrote ${count} records. (Skipped ${recordsDropped} start records)`;
+                    statusBox.innerHTML = `✅ Processed ${count} records.`;
                     statusBox.className = "status success";
 
                 } catch (err) {
-                    console.error("Full Context:", err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
                     statusBox.className = "status error";
                 }
