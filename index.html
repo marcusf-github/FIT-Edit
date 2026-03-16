@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Tools: Shift & Trim</title>
+    <title>FIT Activity Editor: Shift & Trim</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -24,7 +24,7 @@
         
         <div class="row">
             <div>
-                <label>2. Shift (sec):</label>
+                <label>2. Shift Time (sec):</label>
                 <input type="number" id="offset" value="0">
             </div>
             <div>
@@ -63,7 +63,9 @@
                     
                     let count = 0;
                     let firstTimestamp = null;
+                    let distanceOffset = 0; 
                     let recordsDropped = 0;
+                    let lastDistance = 0;
 
                     decoder.read({
                         applyScaleAndOffset: false,
@@ -72,20 +74,37 @@
                         expandComponents: false,
                         mergeHeartRates: false,
                         mesgListener: (mesgNum, message) => {
-                            // 1. Identify the start time of the activity (usually the first 'record' or 'session')
+                            // 1. Establish the original start time
                             if (message.timestamp && firstTimestamp === null) {
                                 firstTimestamp = message.timestamp;
                             }
 
-                            // 2. Trimming Logic: Skip if current timestamp is within the trim window
+                            // 2. Trimming Logic
                             if (trimValue > 0 && message.timestamp) {
                                 if (message.timestamp < (firstTimestamp + trimValue)) {
+                                    // Capture the distance at the moment we trim so we can subtract it later
+                                    if (message.distance !== undefined) {
+                                        distanceOffset = message.distance;
+                                    }
                                     recordsDropped++;
-                                    return; // Skip this record entirely
+                                    return; // Skip this record
                                 }
                             }
 
-                            // 3. Shifting Logic: Apply offset to all time fields
+                            // 3. Distance Correction (Normalization)
+                            // We subtract the distance we skipped so the new start is 0.0m
+                            if (distanceOffset > 0 && message.distance !== undefined) {
+                                message.distance = Math.max(0, message.distance - distanceOffset);
+                                lastDistance = message.distance; // Track for summary update
+                            }
+
+                            // 4. Update Summaries (Session/Lap)
+                            // If we trimmed data, the 'totalDistance' in summaries is now wrong.
+                            if (distanceOffset > 0 && message.totalDistance !== undefined) {
+                                message.totalDistance = Math.max(0, message.totalDistance - distanceOffset);
+                            }
+
+                            // 5. Time Shifting Logic
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
@@ -93,7 +112,7 @@
                                 }
                             });
 
-                            // 4. Clean and Encode
+                            // 6. Data Cleaning & Encoding
                             const cleanMsg = {};
                             for (const key in message) {
                                 if (!key.endsWith('_units') && !key.startsWith('unknown')) {
@@ -123,11 +142,11 @@
                     a.click();
                     document.body.removeChild(a);
 
-                    statusBox.innerHTML = `✅ Success! Wrote ${count} records (Trimmed ${recordsDropped}).`;
+                    statusBox.innerHTML = `✅ Success! Wrote ${count} records. (Skipped ${recordsDropped} start records)`;
                     statusBox.className = "status success";
 
                 } catch (err) {
-                    console.error(err);
+                    console.error("Full Context:", err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
                     statusBox.className = "status error";
                 }
