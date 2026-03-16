@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Editor v3.0 (2026 SDK Fix)</title>
+    <title>FIT Editor v3.1</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; display: flex; flex-direction: column; min-height: 95vh; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -31,8 +31,8 @@
     <div id="statusBox" class="status">Ready</div>
 
     <footer>
-        Logic Version: <strong>v3.0 (Full SDK Integration)</strong><br>
-        Target: Garmin SDK 21.195.00 / Build 2026
+        Logic Version: <strong>v3.1 (Manual Float Correction)</strong><br>
+        SDK: Garmin 21.195.00
     </footer>
 
     <script type="module">
@@ -44,9 +44,8 @@
 
             runBtn.addEventListener('click', async () => {
                 const fileInput = document.getElementById('fileInput');
-                if (!fileInput.files || fileInput.files.length === 0) return alert("Select a file.");
+                if (!fileInput.files.length) return alert("Select a file.");
                 
-                // FIX 1: Accessing the specific file object correctly
                 const selectedFile = fileInput.files[0]; 
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
@@ -64,14 +63,13 @@
                     let distanceOffset = 0;
                     let count = 0;
 
-                    // FIX 2: Satisfying the specific 'if' checks in your decoder.js (Line 144)
                     decoder.read({
-                        applyScaleAndOffset: false, // Prevents 100x distance jump
-                        mergeHeartRates: false,      // Required because scale is false
-                        expandComponents: false,     // Required because scale is false
+                        applyScaleAndOffset: true,  // Use real-world units (floats)
+                        mergeHeartRates: true,       // Enabled since scale is true
+                        expandComponents: true,      // Enabled since scale is true
                         convertDateTimesToDates: false,
                         mesgListener: (mesgNum, message) => {
-                            // In this mode, message values are raw integers (e.g. distance in cm)
+                            // In this version, 'message' contains simple values like distance: 12.5 (meters)
                             const ts = message.timestamp;
                             if (ts && firstTimestamp === null) firstTimestamp = ts;
 
@@ -79,16 +77,15 @@
                             if (trimValue > 0 && ts) {
                                 if (ts < (firstTimestamp + trimValue)) {
                                     if (message.distance !== undefined) distanceOffset = message.distance;
-                                    return; // Drop record
+                                    return; 
                                 }
                             }
 
-                            // 2. Distance Correction (Raw Integer Math)
+                            // 2. Distance Correction (Working with Meters)
                             if (distanceOffset > 0) {
                                 if (message.distance !== undefined) {
                                     message.distance = Math.max(0, message.distance - distanceOffset);
                                 }
-                                // Handle both possible summary naming conventions
                                 ['totalDistance', 'total_distance'].forEach(f => {
                                     if (message[f] !== undefined) {
                                         message[f] = Math.max(0, message[f] - distanceOffset);
@@ -103,15 +100,21 @@
                                 }
                             });
 
-                            // 4. Flattening / Cleaning for the Encoder
+                            // 4. CLEANUP: This is the most important part for the 2026 SDK.
+                            // We MUST remove anything that isn't a standard field name.
                             const cleanMsg = {};
                             for (const key in message) {
-                                // Skip SDK metadata and internal unit strings
+                                const val = message[key];
+                                // Skip internal SDK garbage that breaks the Encoder's scaling
                                 if (key.endsWith('_units') || key.startsWith('unknown') || key.startsWith('$')) continue;
-                                cleanMsg[key] = message[key];
+                                if (key === 'developerFields' || val === null || val === undefined) continue;
+
+                                cleanMsg[key] = val;
                             }
 
                             try {
+                                // The Encoder will see these as floats and "re-scale" them 
+                                // back into the correct FIT binary integers automatically.
                                 encoder.onMesg(mesgNum, cleanMsg);
                                 count++;
                             } catch (e) {
@@ -121,21 +124,17 @@
                     });
 
                     const finalFit = encoder.close();
-                    if (count === 0) throw new Error("No records were found in the file.");
-
                     const blob = new Blob([finalFit], { type: "application/octet-stream" });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = `fixed_${selectedFile.name}`;
-                    document.body.appendChild(a);
                     a.click();
-                    document.body.removeChild(a);
 
-                    statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
+                    statusBox.innerHTML = `✅ Success! Wrote ${count} records.`;
                     statusBox.className = "status success";
                 } catch (err) {
-                    console.error("SDK Error:", err);
+                    console.error(err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
                     statusBox.className = "status error";
                 }
