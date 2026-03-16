@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FIT Precision Editor v2.2</title>
+    <title>FIT Precision Editor v2.4</title>
     <style>
         body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; background: #f8f9fa; display: flex; flex-direction: column; min-height: 90vh; }
         .card { border: 1px solid #ddd; padding: 25px; border-radius: 12px; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
@@ -31,7 +31,7 @@
     <div id="statusBox" class="status">Ready</div>
 
     <footer>
-        Logic Version: <strong>v2.2 (Buffer & Scaling Fix)</strong><br>
+        Logic Version: <strong>v2.4 (SDK Options Fix)</strong><br>
         Using Garmin SDK v21.195.00
     </footer>
 
@@ -44,10 +44,10 @@
 
             runBtn.addEventListener('click', async () => {
                 const fileInput = document.getElementById('fileInput');
-                if (!fileInput.files.length) return alert("Select a file.");
+                // FIX: Check for the file inside the file list
+                if (!fileInput.files || fileInput.files.length === 0) return alert("Select a file.");
                 
-                // FIX: Access the first file in the list
-                const file = fileInput.files[0]; 
+                const selectedFile = fileInput.files[0]; 
                 const offsetValue = parseInt(document.getElementById('offset').value) || 0;
                 const trimValue = parseInt(document.getElementById('trimSec').value) || 0;
                 
@@ -55,8 +55,12 @@
                 statusBox.className = "status";
 
                 try {
-                    const arrayBuffer = await file.arrayBuffer();
+                    const arrayBuffer = await selectedFile.arrayBuffer();
                     const stream = Stream.fromArrayBuffer(arrayBuffer);
+                    
+                    // Integrity Check
+                    if (!Decoder.isFIT(stream)) throw new Error("Not a valid FIT file.");
+
                     const decoder = new Decoder(stream);
                     const encoder = new Encoder();
                     
@@ -64,11 +68,8 @@
                     let distanceOffset = 0;
                     let count = 0;
 
+                    // Execute Read with explicit options to satisfy decoder.js checks
                     decoder.read({
-                        applyScaleAndOffset: false, // Keep raw integers to avoid 100x corruption
-                        convertDateTimesToDates: false,
-                        convertUnits: false,
-                        expandComponents: false,
                         mesgListener: (mesgNum, message) => {
                             if (message.timestamp && firstTimestamp === null) {
                                 firstTimestamp = message.timestamp;
@@ -82,7 +83,7 @@
                                 }
                             }
 
-                            // 2. Subtract Raw Distance (stored as cm/scaled ints in FIT)
+                            // 2. Subtract Raw Distance (keeps scale correct)
                             if (distanceOffset > 0) {
                                 if (message.distance !== undefined) {
                                     message.distance = Math.max(0, message.distance - distanceOffset);
@@ -92,7 +93,7 @@
                                 }
                             }
 
-                            // 3. Time Shift (Seconds)
+                            // 3. Time Shift
                             const timeFields = ['timestamp', 'startTime', 'startDate', 'localTimestamp', 'start_time'];
                             timeFields.forEach(f => {
                                 if (message[f] !== undefined && typeof message[f] === 'number') {
@@ -100,7 +101,7 @@
                                 }
                             });
 
-                            // 4. Cleanup and Encode
+                            // 4. Cleanup
                             const cleanMsg = {};
                             for (const key in message) {
                                 if (!key.endsWith('_units') && !key.startsWith('unknown') && !key.startsWith('$')) {
@@ -108,13 +109,14 @@
                                 }
                             }
 
-                            try {
-                                encoder.onMesg(mesgNum, cleanMsg);
-                                count++;
-                            } catch (e) {
-                                console.warn(`Skipped ${mesgNum}:`, e.message);
-                            }
-                        }
+                            encoder.onMesg(mesgNum, cleanMsg);
+                            count++;
+                        },
+                        applyScaleAndOffset: false, 
+                        mergeHeartRates: false, // MANDATORY: decoder.js throws error if this is true while scaling is false
+                        convertDateTimesToDates: false,
+                        convertUnits: false,
+                        expandComponents: false
                     });
 
                     const finalFit = encoder.close();
@@ -122,13 +124,13 @@
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `edited_${file.name}`;
+                    a.download = `edited_${selectedFile.name}`;
                     a.click();
 
                     statusBox.innerHTML = `✅ Success! Processed ${count} records.`;
                     statusBox.className = "status success";
                 } catch (err) {
-                    console.error(err);
+                    console.error("SDK Error:", err);
                     statusBox.innerHTML = "❌ Error: " + err.message;
                     statusBox.className = "status error";
                 }
